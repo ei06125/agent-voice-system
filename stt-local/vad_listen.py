@@ -47,6 +47,21 @@ WHISPER_MODEL = os.path.normpath(
 
 def find_device() -> int:
     devices = sd.query_devices()
+
+    # If AirPods are the active default *output* (macOS auto-switches to
+    # them the moment they connect), follow them for input too - talking
+    # into a desk mic while audio plays in your ears makes no sense, and
+    # the AirPods mic is right there already. Falls through to the
+    # priority list below when AirPods aren't the active output.
+    try:
+        default_output = sd.query_devices(kind="output")
+        if "airpods" in default_output["name"].lower():
+            for idx, dev in enumerate(devices):
+                if "airpods" in dev["name"].lower() and dev["max_input_channels"] > 0:
+                    return idx
+    except Exception:
+        pass
+
     for pattern in DEVICE_PRIORITY:
         for idx, dev in enumerate(devices):
             if pattern.lower() in dev["name"].lower() and dev["max_input_channels"] > 0:
