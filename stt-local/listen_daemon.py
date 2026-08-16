@@ -54,6 +54,19 @@ WHISPER_MODEL = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "models", "ggml-base.en.bin")
 )
 
+# Bounds so an undrained buffer (Claude busy, no session ending a turn for
+# a while) or a backed-up transcription worker can't grow memory/disk
+# without limit.
+MAX_BUFFER_LINES = int(os.environ.get("STT_MAX_BUFFER_LINES", 200))
+MAX_QUEUED_CLIPS = int(os.environ.get("STT_MAX_QUEUED_CLIPS", 10))
+
+# A capture nothing drains (Claude busy for a long stretch, or just never
+# checks back in) shouldn't sit around forever - expire it after this many
+# seconds since the wake phrase that started it, checked by a watchdog
+# thread every WATCHDOG_INTERVAL_SECONDS.
+MAX_BUFFER_AGE_SECONDS = int(os.environ.get("STT_MAX_BUFFER_AGE_SECONDS", 300))
+WATCHDOG_INTERVAL_SECONDS = 10
+
 SCRIPTS_DIR = os.path.expanduser("~/.claude/scripts")
 BUFFER_FILE = os.path.join(SCRIPTS_DIR, ".voice-buffer.txt")
 MUTE_FLAG = os.path.join(SCRIPTS_DIR, ".voice-mute")
@@ -68,9 +81,15 @@ WAKE_RE = re.compile(
     r"testing[,.!]?\s*(1|one)[,.]?\s+(2|two)[,.]?\s+(3|three)[,.:]?\s*",
     re.IGNORECASE,
 )
-UNMUTE_RE = re.compile(r"\bunmute\b", re.IGNORECASE)
-MUTE_RE = re.compile(r"\bmute\b", re.IGNORECASE)
-DEAF_RE = re.compile(r"\bdeaf\b", re.IGNORECASE)
+# Control keywords share the "OMG" prefix from the production wake phrase
+# (same (oh my god|omg|o m g) alternation) rather than bare words. Bare
+# "unmute" measured unreliable live - whisper transcribed it as "and mute",
+# "Amute", and plain "mute" across repeated attempts, never cleanly as one
+# word, and each miss re-triggered mute instead of clearing it.
+OMG_PREFIX = r"(oh my god|omg|o m g)[,.!]?\s*"
+UNMUTE_RE = re.compile(OMG_PREFIX + r"speak\b", re.IGNORECASE)
+MUTE_RE = re.compile(OMG_PREFIX + r"mute\b", re.IGNORECASE)
+DEAF_RE = re.compile(OMG_PREFIX + r"go deaf\b", re.IGNORECASE)
 
 
 def find_device() -> int:
@@ -114,10 +133,15 @@ def afplay_async(path: str) -> None:
 
 
 class BufferWriter:
-    """Appends to BUFFER_FILE and detects external drains (size shrank)."""
+    """Ring-buffered writer to BUFFER_FILE: keeps only the most recent
+    MAX_BUFFER_LINES utterances, so a buffer nothing drains for a long
+    time can't grow memory/disk without limit - oldest lines are dropped
+    once full. Detects external drains (file shrank since our last write)
+    to know when a capture session has been consumed."""
 
     def __init__(self, path: str):
         self.path = path
+        self.lines: "deque[str]" = deque(maxlen=MAX_BUFFER_LINES)
         self._known_size = self._current_size()
 
     def _current_size(self) -> int:
@@ -129,9 +153,33 @@ class BufferWriter:
     def was_drained(self) -> bool:
         return self._current_size() < self._known_size
 
+    def reset(self) -> None:
+        self.lines.clear()
+
+    def clear(self) -> None:
+        """Actively empty the buffer (self-initiated, e.g. staleness
+        expiry) - unlike reset(), also removes the file on disk rather
+        than just forgetting in-memory state about an external drain."""
+        self.lines.clear()
+        try:
+            os.remove(self.path)
+        except FileNotFoundError:
+            pass
+        self._known_size = 0
+
     def append(self, text: str) -> None:
-        with open(self.path, "a") as f:
-            f.write(text + "\n")
+        was_full = len(self.lines) == self.lines.maxlen
+        self.lines.append(text)
+        if was_full:
+            print(
+                f"[listen-daemon] buffer full ({self.lines.maxlen} lines), "
+                "dropped oldest",
+                file=sys.stderr,
+            )
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write("\n".join(self.lines) + "\n")
+        os.replace(tmp, self.path)
         self._known_size = self._current_size()
 
 
@@ -158,12 +206,15 @@ def handle_utterance(text: str, state: dict, buf: BufferWriter) -> None:
 
     if state["buffering"] and buf.was_drained():
         state["buffering"] = False
+        state["buffer_started_at"] = None
+        buf.reset()
 
     if not state["buffering"]:
         m = WAKE_RE.search(text)
         if not m:
             return
         state["buffering"] = True
+        state["buffer_started_at"] = time.time()
         afplay_async("/System/Library/Sounds/Tink.aiff")
         remainder = text[m.end():].strip()
         if remainder:
@@ -173,6 +224,15 @@ def handle_utterance(text: str, state: dict, buf: BufferWriter) -> None:
 
 
 def main() -> None:
+    # A prior run's buffer file survives a stop/start cycle on disk (only
+    # in-memory state resets) - stale undrained content from before a
+    # restart would otherwise resurface on the next hook drain. Start
+    # every run from a clean buffer.
+    try:
+        os.remove(BUFFER_FILE)
+    except FileNotFoundError:
+        pass
+
     device_idx = find_device()
     print(
         f"[listen-daemon] listening on device {device_idx}: "
@@ -189,8 +249,8 @@ def main() -> None:
         speech_pad_ms=SPEECH_PAD_MS,
     )
 
-    clip_queue: "queue.Queue[np.ndarray]" = queue.Queue()
-    state = {"buffering": False, "stop": False}
+    clip_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=MAX_QUEUED_CLIPS)
+    state = {"buffering": False, "stop": False, "buffer_started_at": None}
     buf = BufferWriter(BUFFER_FILE)
 
     def worker() -> None:
@@ -208,7 +268,24 @@ def main() -> None:
                 print(text, file=sys.stderr, flush=True)
                 handle_utterance(text, state, buf)
 
+    def watchdog() -> None:
+        while not state["stop"]:
+            time.sleep(WATCHDOG_INTERVAL_SECONDS)
+            started_at = state["buffer_started_at"]
+            if state["buffering"] and started_at is not None:
+                age = time.time() - started_at
+                if age > MAX_BUFFER_AGE_SECONDS:
+                    print(
+                        f"[listen-daemon] buffer stale ({age:.0f}s), "
+                        "clearing and waiting for a fresh wake phrase",
+                        file=sys.stderr,
+                    )
+                    state["buffering"] = False
+                    state["buffer_started_at"] = None
+                    buf.clear()
+
     threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=watchdog, daemon=True).start()
 
     preroll_frames = max(1, math.ceil((SPEECH_PAD_MS / 1000) * SAMPLE_RATE / FRAME_SAMPLES))
     preroll: "deque[np.ndarray]" = deque(maxlen=preroll_frames)
@@ -232,7 +309,14 @@ def main() -> None:
         if event is not None and "end" in event:
             in_speech = False
             if speech_buffer:
-                clip_queue.put(np.concatenate(speech_buffer))
+                try:
+                    clip_queue.put_nowait(np.concatenate(speech_buffer))
+                except queue.Full:
+                    print(
+                        "[listen-daemon] transcription backlog full, "
+                        "dropped a clip",
+                        file=sys.stderr,
+                    )
             speech_buffer.clear()
             preroll.clear()
 

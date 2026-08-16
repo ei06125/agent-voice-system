@@ -150,6 +150,46 @@ the original plan and `README.md` for the pipeline diagram and mechanics.
   anymore) but left in place, not deleted, until fully confident nothing
   still depends on it.
 
+**Phase 7 follow-ups: OMG-prefixed control keywords, ring buffers, blocking-poll hook**
+- Live-tested "unmute" and found whisper genuinely couldn't transcribe it
+  reliably ("and mute", "Amute", plain "mute" — never cleanly, across
+  repeated attempts), each miss re-triggering mute instead of clearing it.
+  Replaced all three control keywords with the OMG-prefixed series ("omg
+  mute" / "omg speak" / "omg go deaf", reusing the same `(oh my god|omg|o
+  m g)` alternation as the production wake phrase) — live-verified all
+  three working correctly afterward, including mute correctly suppressing
+  `kokoro-local speak` (text-only reply) and a self-feedback case (my own
+  spoken reply re-triggering unmute harmlessly, since it's idempotent).
+- **Bug found and fixed:** buffer file wasn't cleared on daemon
+  start/restart — stale undrained content from before a restart could
+  resurface on the next hook drain. `listen_daemon.py` now removes the
+  buffer file at the top of `main()`.
+- **Added, per explicit concern about unbounded memory growth:** both ring
+  buffers now bounded. `BufferWriter` keeps only the most recent
+  `STT_MAX_BUFFER_LINES` (default 200) utterances, atomically rewriting
+  the file on each append; `clip_queue` (raw audio awaiting transcription)
+  capped at `STT_MAX_QUEUED_CLIPS` (default 10), dropping the newest clip
+  with a warning rather than blocking the real-time audio callback thread.
+  A background watchdog thread also expires an entire undrained capture
+  after `STT_MAX_BUFFER_AGE_SECONDS` (default 300) regardless of line
+  count, checked every `WATCHDOG_INTERVAL_SECONDS` (10) — protects against
+  a capture nobody ever drains, not just one that grows too large.
+- **Hit live: Claude mid-turn for an extended stretch (many chained tool
+  calls, no natural Stop event) meant captured speech just sat in the
+  buffer with nothing surfacing it**, even though the daemon buffered it
+  correctly — confirmed directly, then fixed. Considered `/loop` (periodic
+  re-invocation) first and rejected it: pull-based, spends a full Claude
+  turn checking even when the buffer is empty. Rewrote `voice-stop-hook.sh`
+  instead to poll the buffer file for up to an hour per Stop event (was:
+  check once, return immediately) — push-based and free while idle, since
+  the watching happens in a detached bash process, not a Claude turn.
+  Added a PID-file lock so frequent Stop events during normal chat don't
+  spawn overlapping pollers racing on the same buffer file. Verified in
+  isolation (dedup, delivery, cleanup all confirmed with a self-contained
+  test harness) — **still unverified whether `exit 2` can interrupt an
+  actively-generating turn or only delivers at the next natural turn
+  boundary**, no way to test that distinction from inside one conversation.
+
 ## Open items
 
 - **Wake phrase is in test mode.** `~/.claude/scripts/voice-listen.sh` and
