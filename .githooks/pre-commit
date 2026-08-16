@@ -1,0 +1,44 @@
+#!/bin/bash
+# Pre-commit: run tests for every project (dir with a pyproject.toml) that
+# has a tests/ directory anywhere in the repo.
+#
+# Runs each project's tests via `uv run --with pytest pytest -q <tests_dir>`
+# rather than executing test files directly. An earlier version ran each
+# test_*.py directly with plain python3 - that silently no-ops on any file
+# written pytest-only (no `if __name__ == "__main__":` runner, e.g.
+# stt-local/tests/test_delivery_worker.py's asyncio-based tests), since
+# nothing calls its test functions outside of pytest collection. Direct
+# execution exits 0 having run zero tests, and the hook reported it as a
+# pass. pytest correctly collects both that style and the plain-assert +
+# __main__ style used elsewhere (see test_playback_gate.py) uniformly, so
+# there's one code path instead of two silently-divergent ones.
+set -uo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+status=0
+ran_any=0
+
+while IFS= read -r -d '' tests_dir; do
+  proj_dir="$(dirname "$tests_dir")"
+  if [[ ! -f "$proj_dir/pyproject.toml" ]]; then
+    continue
+  fi
+  ran_any=1
+  echo "pre-commit: running pytest in $proj_dir"
+  if ! (cd "$proj_dir" && uv run --with pytest pytest -q tests); then
+    echo "pre-commit: FAILED $proj_dir"
+    status=1
+  fi
+done < <(find "$repo_root" -type d -name 'tests' \
+  -not -path '*/.venv/*' -not -path '*/node_modules/*' -print0)
+
+if [[ "$ran_any" -eq 0 ]]; then
+  echo "pre-commit: no tests found, nothing to run"
+fi
+
+if [[ $status -ne 0 ]]; then
+  echo "pre-commit: one or more tests failed - commit aborted"
+  exit 1
+fi
+
+exit 0
