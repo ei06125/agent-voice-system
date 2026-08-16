@@ -3,3 +3,4 @@ stt-local/__pycache__/
 models/
 *.pyc
 .DS_Store
+outputs/

@@ -36,7 +36,7 @@ DEVICE_PRIORITY = [
     if p.strip()
 ]
 THRESHOLD = 0.5
-MIN_SILENCE_MS = 500
+MIN_SILENCE_MS = int(os.environ.get("STT_MIN_SILENCE_MS", 500))
 SPEECH_PAD_MS = 200
 
 WHISPER_BIN = "/opt/homebrew/bin/whisper-cli"

@@ -77,8 +77,18 @@ one utterance's journey through the pipeline.
    wake-word-gated command comes through, kills the listener, and exits
    code 2 with the transcript — which wakes Claude back up with it as the
    next turn (prefixed "Voice command captured: "). Claude still composes
-   the reply and speaks it manually (`dg speak` + `afplay`) — only the
-   listen/rewire step is automated. Since the hook only starts listening
+   the reply and speaks it manually — via the `kokoro-local` MCP tool
+   (`mcp__kokoro-local__speak`, registered user-scoped in `~/.claude.json`,
+   replacing `dg speak` + `afplay`) — only the listen/rewire step is
+   automated. `kokoro-local` runs as a persistent stdio MCP server so the
+   Kokoro-82M model loads once per Claude Code session instead of once per
+   call; `mcp_server.py` also explicitly requests the MPS (Metal) device,
+   since kokoro's own auto-detect only checks `torch.cuda.is_available()`
+   and silently falls back to CPU on Apple Silicon otherwise. Measured on
+   this machine: ~0.16s per call once warm (vs `dg speak`'s 6.83s
+   network+generation round-trip), after a one-time ~8-9s warm-up
+   (pipeline load + first-call Metal kernel compile) on the first `speak`
+   call of a session. Since the hook only starts listening
    after Claude's whole turn (including the TTS playback) has finished,
    the anti-feedback turn-taking behavior falls out for free.
    Kill switch: `touch ~/.claude/scripts/.voice-hook-disabled` to turn it

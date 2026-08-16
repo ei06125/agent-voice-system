@@ -1,6 +1,6 @@
 # Progress against PLAN.md
 
-Status as of 2026-08-15, end of first working session. See `PLAN.md` for
+Status as of 2026-08-16, end of second working session. See `PLAN.md` for
 the original plan and `README.md` for the pipeline diagram and mechanics.
 
 ## Done
@@ -59,39 +59,127 @@ the original plan and `README.md` for the pipeline diagram and mechanics.
   standalone artifact. Two stale facts in `README.md` fixed along the way
   (single `voice-listen.sh` location, actual exit phrase).
 
+**Phase 5 — swap TTS to kokoro-local**
+- Confirmed standalone (`uv run`), then registered `kokoro-local` as a
+  persistent user-scoped MCP server (`claude mcp add -s user kokoro-local
+  -- uv run --project /Users/pedro/.mcp/kokoro-local python
+  /Users/pedro/.mcp/kokoro-local/mcp_server.py`) so the Kokoro-82M model
+  loads once per Claude Code session instead of once per call.
+- **Bug found and fixed:** kokoro's own device auto-detect
+  (`kokoro/pipeline.py`) only checks `torch.cuda.is_available()`, never
+  MPS — silently ran on CPU on this Apple Silicon machine. `mcp_server.py`
+  now explicitly requests `device="mps"` with a CPU fallback. Committed
+  in `kokoro-local` (`2f157b7`).
+- Latency measured directly: `dg speak` 6.83s end-to-end (network +
+  generation); `kokoro-local` warm-call generation 0.16s on MPS (was
+  0.33s on CPU), after a one-time ~8-9s warm-up (pipeline load + first
+  Metal kernel compile) on the first `speak` call of a session.
+- New convention recorded as project memory (`tts_convention_kokoro_local`)
+  and in `README.md`'s "How it works" step 5 — `mcp__kokoro-local__speak`
+  replaces `dg speak "..." -o reply.mp3 --non-interactive && afplay
+  reply.mp3`.
+- Live-verified: called the MCP tool directly in-session, audio played
+  correctly both cold and warm.
+
+**Phase 6 — full live loop via the actual Stop hook**
+- **Bug found and fixed before testing:** `voice-stop-hook.sh` only did
+  `kill "$LISTENER_PID"` (the `voice-listen.sh` shell) plus a dead
+  `pkill -f "dg listen --mic"` pattern left over from the old producer.
+  Since `vad_listen.py` runs as the first stage of a pipeline *inside*
+  `voice-listen.sh`, killing just the parent shell doesn't reliably kill
+  it — it can orphan and keep holding the mic open. Matches the stray
+  processes found during Phase 5 testing. Fixed: both the idempotency
+  section and post-capture cleanup now `pkill -f "vad_listen.py"` by name.
+- Registered `mcp__kokoro-local__speak` in the global permissions allow
+  list (`~/.claude/settings.json`) so it doesn't prompt per call.
+- Live-verified through the real hook path twice in a row, no manual
+  process cleanup needed in between (the test gate): "what time is it?"
+  → answered via kokoro-local; "what's the weather in Tokyo?" → answered
+  via kokoro-local + a live web search. Both cycles: Tink → mic → VAD →
+  whisper → wake gate → debounce → Pop → hook exit 2 → Claude reply →
+  kokoro-local speak, cleanly.
+
+**Phase 7 — redesigned scope: always-on listener, decoupled from the hook**
+- Original scope (shrink the 3s debounce) got superseded mid-session. Model
+  benchmark done first: tried `ggml-tiny.en.bin` against `base.en` on
+  synthesized speech — tiny.en saved ~50-160ms/call but dropped a leading
+  word once out of 3 tests; kept `base.en` (already fast enough, ~0.2-0.25s,
+  not worth the accuracy risk given we already fixed one clipped-first-word
+  bug in this pipeline). `models/ggml-tiny.en.bin` removed after the call.
+- Live debounce/VAD tuning (`DEBOUNCE=1.2`, `STT_MIN_SILENCE_MS=350`) hit
+  repeated silent/garbled tests — turned out to be a bigger, real problem:
+  the per-turn-spawned listener only has a narrow window to hear you (after
+  Claude's turn ends, before the next begins), and coordinating "say it
+  now" over text chat was the root cause of most of this session's failed
+  live tests, not the tuning itself.
+- **Redesigned instead of tuned further:** always-on daemon
+  (`stt-local/listen_daemon.py`), started/stopped only via two new MCP
+  tools (`mcp__stt-local__start_listener` / `stop_listener`, registered
+  user-scoped like `kokoro-local`) — never auto-starts at boot. Runs
+  independent of any Claude turn or hook. Wake phrase now matched
+  **anywhere** in an utterance (not anchored to line-start); once heard,
+  everything is appended to `~/.claude/scripts/.voice-buffer.txt` until
+  drained. `voice-stop-hook.sh` rewritten to just drain that file (exit 2
+  if non-empty, else exit 0 immediately) — no longer spawns/kills a
+  listener itself. Full mechanism + the three independent controls
+  (`.voice-hook-disabled` manual / `.voice-mute` voice-toggleable-output-
+  only / "deaf" voice-triggered-one-way-stop) recorded in project memory
+  (`donna-always-on-listener`).
+- **Bug found and fixed:** unpinned `uv add mcp` in `stt-local` grabbed
+  `2.0.0`, which renamed `FastMCP` to `MCPServer` and moved its import
+  path — `mcp_server.py` failed to connect with `ModuleNotFoundError`.
+  Pinned to `mcp==1.28.1` (matches `kokoro-local`) to fix; see "Open items"
+  for the follow-up.
+- Built and unit-tested with plain-string inputs first (wake-anywhere
+  matching, buffering + drain-detection state machine, mute/unmute/deaf
+  dispatch, hook drain/join logic) — all passed, no audio involved
+  (deliberately deferred live testing while the user was watching TV and
+  didn't want ambient audio risked being captured).
+- **Live-verified end to end once the TV was off:** started the daemon via
+  `start_listener`, confirmed it buffered real speech across multiple
+  Claude turns while unrelated work was happening (proving the core design
+  goal — capture is no longer tied to turn timing), confirmed a wake
+  phrase mid-buffer doesn't get specially stripped (just appended verbatim
+  as continuation text, expected), and confirmed the real Stop hook
+  drained the buffer correctly and rewoke Claude with the joined content.
+  One bug caught live: a stale `.voice-hook-disabled` flag (left over from
+  earlier debounce testing, never cleared) silently suppressed the first
+  two test utterances — daemon behaved correctly (flag respected), but a
+  reminder that flag state carries across the whole session.
+- `voice-listen.sh` is now dead code in this flow (nothing calls it
+  anymore) but left in place, not deleted, until fully confident nothing
+  still depends on it.
+
 ## Open items
 
-- **Wake phrase is in test mode.** `~/.claude/scripts/voice-listen.sh`
-  currently matches `"testing 1, 2, 3"` instead of the production phrase,
-  swapped for reliable cued testing over text chat (hard to sync speaking
-  a specific phrase with someone reading a chat message telling them to).
-  The production regex is commented directly above it in the script —
-  **revert before relying on this for real use.**
-- Biggest lesson from today's live-testing: most "silent" test failures
-  were coordination lag (user speaks while dictating a chat message,
-  which finishes *before* the next listening window opens), not pipeline
-  bugs — confirmed by an objective raw signal-level check
-  (`sounddevice` max/mean amplitude) that caught real speech cleanly once
-  timing actually lined up. Two real bugs surfaced this way regardless
-  (above); worth remembering the pipeline itself is solid before
-  assuming a silent test means it's broken.
+- **Wake phrase is in test mode.** `~/.claude/scripts/voice-listen.sh` and
+  `stt-local/listen_daemon.py` both currently match `"testing 1, 2, 3"`
+  instead of the production phrase, swapped for reliable cued testing over
+  text chat (hard to sync speaking a specific phrase with someone reading
+  a chat message telling them to). The production regex is commented
+  directly above it in both files — **revert before relying on this for
+  real use.**
+- **`mcp` package pinned to `1.28.1` in both `kokoro-local` and
+  `stt-local`.** `mcp` 2.0.0 renamed/restructured `FastMCP`
+  (`mcp.server.fastmcp.FastMCP`) to `MCPServer`
+  (`mcp.server.mcpserver.server.MCPServer`, imported as `mcp.server.MCPServer`).
+  `MCPServer` looks API-compatible with `FastMCP` (same `.tool()`
+  decorator, `.run()` method) but untested — revisit bumping both projects
+  off the 1.x pin together at some point rather than drifting further
+  behind.
+- **Mute/deaf keywords not yet live-tested.** Unit-tested only so far (see
+  Phase 7 above). Still need real-speech verification that "mute"/"unmute"
+  correctly gate `mcp__kokoro-local__speak` (the check itself is a
+  behavioral convention in memory, not enforced by code) and that "deaf"
+  cleanly stops the daemon with `start_listener` able to bring it back.
+- Biggest lesson from this session's live-testing: most "silent" test
+  failures were either coordination lag (the old per-turn-spawned listener
+  model, now superseded by Phase 7's redesign) or stale flag-file state
+  carried over from earlier tests — not pipeline bugs. Worth checking flag
+  state first before assuming a silent test means something's broken.
 
 ## Not started
 
-**Phase 5 — swap TTS to kokoro-local**
-- Confirm standalone: `uv run --project /Users/pedro/.mcp/kokoro-local
-  python -c "from mcp_server import speak; speak('test')"`.
-- Record the new convention as project memory (the `dg speak` convention
-  was never in a config file — it was a per-turn behavioral pattern, not
-  something a file edit replaces).
-- Side-by-side latency check against `dg speak` (unmeasured, per
-  `PLAN.md`'s open questions).
-
-**Phase 6 — full live loop via the actual Stop hook**
-- Not yet tested through the real hook path (`~/.claude/settings.json` →
-  `voice-stop-hook.sh` → FIFO). All testing so far has been direct
-  invocation of `voice-listen.sh`, bypassing the hook.
-
-**Phase 7 (optional, deferred)**
-- Revisit whether the 3s debounce can shrink now that Silero does real
-  endpointing. Only after Phase 6 passes.
+Nothing currently — Phase 7 was the last item from `PLAN.md`'s original
+7-phase breakdown, redesigned but complete. Open items above are the
+remaining loose ends, not new phases.
