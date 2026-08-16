@@ -15,6 +15,21 @@
 set -uo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
+
+# Secrets scan first, before spending time on tests - blocks the commit
+# outright on any finding in the staged diff. Requires gitleaks on PATH;
+# fails closed (aborts the commit) rather than silently skipping if it's
+# missing, since a missing scanner is not the same as a clean scan.
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks not found on PATH - install it (brew install gitleaks) - commit aborted"
+  exit 1
+fi
+echo "pre-commit: running gitleaks on staged changes"
+if ! gitleaks protect --source "$repo_root" --staged --redact -v; then
+  echo "pre-commit: gitleaks found a potential secret - commit aborted"
+  exit 1
+fi
+
 status=0
 ran_any=0
 
