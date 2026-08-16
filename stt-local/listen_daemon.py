@@ -1,39 +1,57 @@
-"""Always-on wake-word-anywhere listener with buffering + mute/deaf control.
+"""Always-on listener with mute/deaf control and two independent modes.
 
 Started/stopped via the stt-local MCP server's start_listener/stop_listener
 tools - runs continuously, independent of any Claude Code turn or Stop hook
 lifecycle. Silero VAD chunks the mic stream, whisper.cpp transcribes each
 utterance, and each transcript is checked (in order) for the "unmute",
-"mute", and "deaf" control keywords, then for the wake phrase matched
-ANYWHERE in the utterance (not anchored to the start, unlike the old
-per-turn voice-listen.sh gate) - so it can be said mid-thought without
-needing a clean line boundary. Once heard, every utterance from that point
-is appended to a buffer file that the Stop hook drains on each Claude turn
-end; a drain (file truncated by something other than this process) ends
-that capture and requires a fresh wake phrase to resume.
+"mute", and "deaf" control keywords.
+
+DONNA_VOICE_QUEUE_MODE=shadow (and "off") keep the original design: a wake
+phrase matched ANYWHERE in an utterance arms a capture, every utterance
+from that point is appended to a buffer file the Stop hook drains, and a
+drain ends the capture (fresh wake phrase required to resume).
+
+DONNA_VOICE_QUEUE_MODE=deliver is a different, newer design (no wake
+phrase, no capture state): every finalized utterance is logged
+unconditionally, with a timestamp, to one append-only file
+(UTTERANCE_LOG_PATH) - nothing is ever lost to a pause or a missing wake
+word. Separately, hearing the bare name "Donna" anywhere touches a
+lightweight trigger file (NAME_MENTIONED_PATH) - not a content gate,
+everything is logged regardless, just what taps whichever Claude session
+is watching so it isn't paged on every ambient sound. That session reads
+everything logged since its own last-read position and judges relevance
+itself. See handle_utterance's deliver branch for the full rationale.
 
 "mute"/"unmute" only gate whether Claude speaks replies aloud (see
 .voice-mute, checked by Claude itself before calling kokoro-local) - this
-daemon keeps listening and buffering either way. "deaf" stops this process
+daemon keeps listening and logging either way. "deaf" stops this process
 entirely; since a stopped daemon can't hear anything, the only way back is
 typing in the Claude Code session to trigger start_listener again.
 """
 
+import glob
+import json
 import math
 import os
 import queue
+import random
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections import deque
 
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
 from silero_vad_notorch import VADIterator, load_silero_vad
+
+from playback_control import cancel_playback, register_playback
+from voice_queue import DEFAULT_STATE_DIR, VoiceQueue
 
 SAMPLE_RATE = 16000
 FRAME_SAMPLES = 512  # required chunk size for silero-vad-notorch at 16kHz
@@ -45,6 +63,19 @@ DEVICE_PRIORITY = [
     ).split(",")
     if p.strip()
 ]
+# Default True preserves the original "AirPods become default output ->
+# follow them for input too" behavior. Set to false when the goal is the
+# opposite: route TTS to AirPods specifically to physically separate it
+# from a fixed desk/webcam mic, so the mic never picks up the echo at
+# all - the daemon must NOT then also switch its own input to the
+# AirPods' mic, which would put input and output back on the same
+# physical device and reintroduce exactly the echo problem this was
+# meant to avoid.
+FOLLOW_AIRPODS_INPUT = os.environ.get("STT_FOLLOW_AIRPODS_INPUT", "1") not in {
+    "0",
+    "false",
+    "False",
+}
 THRESHOLD = 0.5
 MIN_SILENCE_MS = int(os.environ.get("STT_MIN_SILENCE_MS", "500"))
 SPEECH_PAD_MS = 200
@@ -88,6 +119,14 @@ MUTE_FLAG = os.path.join(SCRIPTS_DIR, ".voice-mute")
 DISABLE_FLAG = os.path.join(SCRIPTS_DIR, ".voice-hook-disabled")
 PID_FILE = os.path.join(SCRIPTS_DIR, ".voice-daemon.pid")
 
+VOICE_QUEUE_MODE = os.environ.get("DONNA_VOICE_QUEUE_MODE", "shadow").lower()
+if VOICE_QUEUE_MODE not in {"off", "shadow", "deliver"}:
+    raise ValueError("DONNA_VOICE_QUEUE_MODE must be 'off', 'shadow', or 'deliver'")
+# No DONNA_CLAUDE_SESSION_ID requirement here anymore: deliver mode no
+# longer resumes any Claude session (see the continuous-log design below,
+# by _append_utterance_log/_write_name_mentioned_trigger) - it just writes
+# a local file for whichever session happens to be watching.
+
 # Set by kokoro-local's speak() around each afplay call (see its
 # mcp_server.py) - the only signal this daemon has that DONNA's own TTS is
 # about to come out of the speaker. VAD can't tell the difference between
@@ -95,26 +134,57 @@ PID_FILE = os.path.join(SCRIPTS_DIR, ".voice-daemon.pid")
 # capture while it's set, plus a short hangover after it clears, is Mode A
 # from that doc - half-duplex turn-taking, not real echo cancellation, but
 # directly fixes the self-feedback loop hit live this session.
-PLAYBACK_FLAG = os.path.join(SCRIPTS_DIR, ".voice-playback")
+#
+# kokoro-local is user-scoped, so multiple server processes (one per open
+# Claude Code session) can be alive and speaking concurrently. Each writes
+# its own PID-suffixed flag file (.voice-playback-flag-<pid>) rather than
+# a single shared path, so one process's cleanup can never delete another
+# still-playing process's flag - gate on whether *any* match the glob.
+# (A shared single path let exactly that happen live: one process's
+# `finally` cleanup cleared the flag mid-playback of a second process,
+# and the daemon transcribed that second process's own TTS output as a
+# real voice command.)
+PLAYBACK_FLAG_GLOB_NAME = ".voice-playback-flag-*"
 PLAYBACK_HANGOVER_MS = int(os.environ.get("STT_PLAYBACK_HANGOVER_MS", "250"))
 
-# Testing wake phrase while validating the local STT engine - matches the
-# one used by the old voice-listen.sh gate. Production phrase (swap in
-# once confident the wake word itself is the only remaining unknown):
-# WAKE_RE = re.compile(r"(oh my god|omg|o m g)[,.!]?\s*donna[,.!]?\s*", re.IGNORECASE)
+
+def is_playback_active(scripts_dir: str = SCRIPTS_DIR) -> bool:
+    """True while any kokoro-local process (any session) is mid-speech."""
+    return bool(glob.glob(os.path.join(scripts_dir, PLAYBACK_FLAG_GLOB_NAME)))
+
+
+def _should_gate_for_playback(voice_queue_mode: str) -> bool:
+    """shadow/off discard all mic frames during playback (self-feedback
+    prevention - a real, previously hit-live bug for those modes' single-
+    command semantics). deliver mode intentionally does not: real barge-in
+    ("kill my current afplay the moment you say my name again") needs the
+    mic listening *during* playback, and true self-feedback rejection
+    (telling my own echoed voice apart from yours) would need real
+    acoustic echo cancellation to do safely. The substitute deliver mode
+    already has: everything gets logged either way, and only a "Donna"
+    mention triggers anything - my own TTS essentially never says my own
+    name mid-reply, so echo picked up by the mic just sits harmlessly in
+    the log instead of paging anyone."""
+    return voice_queue_mode != "deliver" and is_playback_active()
+
+
 WAKE_RE = re.compile(
-    r"testing[,.!]?\s*(1|one)[,.]?\s+(2|two)[,.]?\s+(3|three)[,.:]?\s*",
+    r"(oh my god|omg|o m g)[,.!]?\s*donna[,.!]?\s*",
     re.IGNORECASE,
 )
-# Control keywords share the "OMG" prefix from the production wake phrase
-# (same (oh my god|omg|o m g) alternation) rather than bare words. Bare
-# "unmute" measured unreliable live - whisper transcribed it as "and mute",
-# "Amute", and plain "mute" across repeated attempts, never cleanly as one
-# word, and each miss re-triggered mute instead of clearing it.
+# Control keywords require an explicit address prefix rather than bare
+# words, same reasoning as ever: bare "unmute" measured unreliable live -
+# whisper transcribed it as "and mute", "Amute", and plain "mute" across
+# repeated attempts, never cleanly as one word, and each miss re-triggered
+# mute instead of clearing it. Accepts either the original "OMG Donna"
+# phrase or bare "Donna" (deliver mode's newer bare-name convention - hit
+# live: "Okay, Donna, mute" didn't match the OMG-only version of this
+# regex, so mute silently failed while the daemon kept talking).
 OMG_PREFIX = r"(oh my god|omg|o m g)[,.!]?\s*"
-UNMUTE_RE = re.compile(OMG_PREFIX + r"speak\b", re.IGNORECASE)
-MUTE_RE = re.compile(OMG_PREFIX + r"mute\b", re.IGNORECASE)
-DEAF_RE = re.compile(OMG_PREFIX + r"go deaf\b", re.IGNORECASE)
+ADDRESS_PREFIX = r"((oh my god|omg|o m g)([,.!]?\s*donna)?|donna)[,.!]?\s*"
+UNMUTE_RE = re.compile(ADDRESS_PREFIX + r"speak\b", re.IGNORECASE)
+MUTE_RE = re.compile(ADDRESS_PREFIX + r"mute\b", re.IGNORECASE)
+DEAF_RE = re.compile(ADDRESS_PREFIX + r"go deaf\b", re.IGNORECASE)
 
 
 def find_device() -> int:
@@ -124,15 +194,22 @@ def find_device() -> int:
     # them the moment they connect), follow them for input too - talking
     # into a desk mic while audio plays in your ears makes no sense, and
     # the AirPods mic is right there already. Falls through to the
-    # priority list below when AirPods aren't the active output.
-    try:
-        default_output = sd.query_devices(kind="output")
-        if "airpods" in default_output["name"].lower():
-            for idx, dev in enumerate(devices):
-                if "airpods" in dev["name"].lower() and dev["max_input_channels"] > 0:
-                    return idx
-    except Exception:  # noqa: BLE001, S110 - backend-specific, fall through
-        pass
+    # priority list below when AirPods aren't the active output, or when
+    # FOLLOW_AIRPODS_INPUT is explicitly disabled (STT_FOLLOW_AIRPODS_INPUT=0)
+    # for the opposite goal: TTS to AirPods, mic staying on a fixed desk
+    # device, so playback and capture are on physically separate hardware.
+    if FOLLOW_AIRPODS_INPUT:
+        try:
+            default_output = sd.query_devices(kind="output")
+            if "airpods" in default_output["name"].lower():
+                for idx, dev in enumerate(devices):
+                    if (
+                        "airpods" in dev["name"].lower()
+                        and dev["max_input_channels"] > 0
+                    ):
+                        return idx
+        except Exception:  # noqa: BLE001, S110 - backend-specific, fall through
+            pass
 
     for pattern in DEVICE_PRIORITY:
         for idx, dev in enumerate(devices):
@@ -211,7 +288,172 @@ class BufferWriter:
         self._known_size = self._current_size()
 
 
-def handle_utterance(text: str, state: dict, buf: BufferWriter) -> None:
+def _close_capture(state: dict, buf: BufferWriter) -> None:
+    """End the current wake-authorized capture (shadow/off modes only); a
+    fresh wake phrase is required before the next utterance is treated as
+    a command. deliver mode has no capture state at all - see below."""
+    state["buffering"] = False
+    state["buffer_started_at"] = None
+    state["capture_id"] = None
+    state["utterance_seq"] = 0
+    buf.reset()
+
+
+def append_command(
+    text: str,
+    state: dict,
+    buf: BufferWriter,
+    voice_queue: VoiceQueue | None,
+    vad_ended_at: float | None,
+) -> None:
+    """shadow/off only now - deliver mode never calls this (see
+    _append_utterance_log below)."""
+    if voice_queue is not None:
+        state["utterance_seq"] += 1
+        try:
+            result = voice_queue.enqueue_and_notify(
+                capture_id=state["capture_id"],
+                utterance_seq=state["utterance_seq"],
+                text=text,
+                vad_ended_at=vad_ended_at,
+                is_shadow=True,
+            )
+        except (OSError, sqlite3.Error) as error:
+            print(
+                f"[listen-daemon] queue write failed: {error}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[listen-daemon] shadow-queued voice command {result.message_id}",
+                file=sys.stderr,
+            )
+    buf.append(text)
+
+
+# --- deliver mode: continuous log + name-mention trigger ------------------
+#
+# Replaces an earlier wake-phrase-gated "one command per wake" design.
+# That required "Oh my god, Donna" before every single utterance and cut
+# you off mid-thought the moment VAD saw a pause (a new wake phrase was
+# required to continue) - reported live as "I really don't want this
+# wake-up word... I want you to be able to speak freely."
+#
+# New design, per that conversation: log every finalized utterance
+# unconditionally (mute/deaf/DISABLE_FLAG excepted) to one append-only,
+# timestamped file - never gated, so nothing is ever lost to a pause or a
+# missing wake phrase, and lead-up context is always available. Separately,
+# touch a lightweight trigger file only when the bare name "Donna" is
+# heard (no "OMG" prefix needed) - not a content gate (everything is
+# logged either way), just what taps Claude so ambient noise/video/other
+# people don't page it every time Whisper transcribes something. Claude
+# reads everything since its own last-read position on each trigger and
+# judges relevance itself (its name was misheard, someone else was being
+# addressed, etc.) rather than the daemon guessing.
+UTTERANCE_LOG_PATH = DEFAULT_STATE_DIR / "utterance-log.jsonl"
+NAME_MENTIONED_PATH = DEFAULT_STATE_DIR / "donna-mentioned.json"
+NAME_RE = re.compile(r"\bdonna\b", re.IGNORECASE)
+
+# Pre-rendered (not live-synthesized - that has its own latency) filler
+# clips, played instantly, in this process, the moment "Donna" is heard -
+# not after the round trip to Claude, which measured ~35s end to end live
+# tonight (VAD finalize -> file write -> fswatch -> notification -> Claude
+# reads, composes, calls speak()). A filler fired only after that round
+# trip completes is fired 35s too late to mask anything. Regenerate with
+# kokoro-local's speak(play=False, output_dir=str(FILLERS_DIR)) - plain
+# afplay here, no TTS dependency in this process.
+FILLERS_DIR = DEFAULT_STATE_DIR / "fillers"
+
+# The filler+notify trigger is debounced by this many ms of silence after
+# the last utterance, not fired on the instant "Donna" is heard - firing
+# immediately risked firing mid-thought, since VAD splits one continuous
+# sentence into multiple utterances on any brief pause (hit live: "Alright
+# Donna, so for the" / "Myth." were one interrupted thought, not two).
+# Any further speech during the window - not just another "Donna" mention
+# - cancels and reschedules, so it only fires once you've actually gone
+# quiet. Barge-in (killing current playback) is NOT debounced - see
+# handle_utterance's deliver branch - there's no reason to delay cutting
+# off a reply just because you might keep talking after saying my name.
+TRIGGER_DEBOUNCE_MS = int(os.environ.get("STT_DONNA_DEBOUNCE_MS", "900"))
+
+
+def _append_utterance_log(text: str, vad_ended_at: float | None) -> None:
+    DEFAULT_STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    record = {
+        "ts": vad_ended_at if vad_ended_at is not None else time.time(),
+        "text": text,
+    }
+    fd = os.open(UTTERANCE_LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, (json.dumps(record) + "\n").encode())
+    finally:
+        os.close(fd)
+
+
+def _play_filler() -> None:
+    """Instant, local, no round trip to Claude - see FILLERS_DIR comment
+    for why this exists. Registered with playback_control so a later
+    barge-in (another "Donna" mention, or "mute") can still kill it, same
+    as any other playback; harmless if none exist yet (empty list)."""
+    clips = sorted(FILLERS_DIR.glob("filler-*.wav"))
+    if not clips:
+        return
+    proc = subprocess.Popen(
+        ["afplay", str(random.choice(clips))],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        register_playback(proc.pid)
+    except ProcessLookupError:
+        pass
+
+
+def _fire_trigger(state: dict, text: str) -> None:
+    """The actual filler+notify action - only reached after
+    TRIGGER_DEBOUNCE_MS of silence, via _schedule_trigger below. Runs on
+    a threading.Timer's own thread, not the VAD worker thread."""
+    # Must clear this: state["pending_trigger_timer"] is what
+    # handle_utterance checks to decide "is a trigger already pending"
+    # (see its `name_mentioned or state.get(...) is not None` check).
+    # Leaving the completed timer object in place would make every
+    # utterance from here on look like it's still within a pending
+    # window, since a finished Timer is still not None - re-triggering
+    # forever on content with no "Donna" mention at all (hit live: "This
+    # is it, Donna." correctly fired, then "This is the final test." -
+    # no name in it - incorrectly fired again because of exactly this).
+    state["pending_trigger_timer"] = None
+    _play_filler()
+    data = {"trigger_text": text, "ts": time.time()}
+    NAME_MENTIONED_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = NAME_MENTIONED_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data))
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, NAME_MENTIONED_PATH)
+
+
+def _schedule_trigger(state: dict, text: str) -> None:
+    """(Re)start the debounce window. Called for the utterance that first
+    mentions "Donna", and for every utterance after that while a trigger
+    is still pending - see TRIGGER_DEBOUNCE_MS."""
+    existing = state.get("pending_trigger_timer")
+    if existing is not None:
+        existing.cancel()
+    timer = threading.Timer(
+        TRIGGER_DEBOUNCE_MS / 1000, _fire_trigger, args=(state, text)
+    )
+    timer.daemon = True
+    state["pending_trigger_timer"] = timer
+    timer.start()
+
+
+def handle_utterance(
+    text: str,
+    state: dict,
+    buf: BufferWriter,
+    voice_queue: VoiceQueue | None = None,
+    vad_ended_at: float | None = None,
+) -> None:
     """Pure-ish dispatch on one transcribed utterance. Mutates state/buf."""
     if UNMUTE_RE.search(text):
         try:
@@ -222,6 +464,11 @@ def handle_utterance(text: str, state: dict, buf: BufferWriter) -> None:
         return
     if MUTE_RE.search(text):
         open(MUTE_FLAG, "a").close()
+        # "mute" previously only prevented *future* speak() calls - a
+        # reply already mid-playback kept talking right over you, since
+        # nothing told afplay to stop. Same cancel_playback() barge-in
+        # already wired for hearing "Donna" again mid-reply.
+        cancel_playback()
         print("[listen-daemon] mute", file=sys.stderr)
         return
     if DEAF_RE.search(text):
@@ -232,10 +479,26 @@ def handle_utterance(text: str, state: dict, buf: BufferWriter) -> None:
     if os.path.exists(DISABLE_FLAG):
         return
 
+    if VOICE_QUEUE_MODE == "deliver":
+        _append_utterance_log(text, vad_ended_at)
+        name_mentioned = NAME_RE.search(text)
+        if name_mentioned:
+            # Barge-in stays instant, not debounced: hearing "Donna"
+            # again while a reply is playing means "stop talking, listen
+            # to this instead" - no reason to wait and see if more
+            # speech follows before cutting off the old reply. No-op
+            # (empty list) if nothing is currently registered as
+            # playing. Uses the same register_playback()/cancel_playback()
+            # ownership contract the typed UserPromptSubmit hook uses -
+            # see playback_control.py.
+            cancel_playback()
+        if name_mentioned or state.get("pending_trigger_timer") is not None:
+            _schedule_trigger(state, text)
+        return
+
+    # shadow/off: unchanged wake-phrase-gated buffering state machine.
     if state["buffering"] and buf.was_drained():
-        state["buffering"] = False
-        state["buffer_started_at"] = None
-        buf.reset()
+        _close_capture(state, buf)
 
     if not state["buffering"]:
         m = WAKE_RE.search(text)
@@ -243,17 +506,19 @@ def handle_utterance(text: str, state: dict, buf: BufferWriter) -> None:
             return
         state["buffering"] = True
         state["buffer_started_at"] = time.time()
+        state["capture_id"] = str(uuid.uuid4())
+        state["utterance_seq"] = 0
         afplay_async("/System/Library/Sounds/Tink.aiff")
         remainder = text[m.end() :].strip()
         if remainder:
-            buf.append(remainder)
+            append_command(remainder, state, buf, voice_queue, vad_ended_at)
     else:
-        buf.append(text)
+        append_command(text, state, buf, voice_queue, vad_ended_at)
 
 
 def run_vad_worker(
     frame_queue: "queue.Queue[np.ndarray]",
-    clip_queue: "queue.Queue[np.ndarray]",
+    clip_queue: "queue.Queue[tuple[np.ndarray, float]]",
     vad: VADIterator,
     state: dict,
 ) -> None:
@@ -276,7 +541,7 @@ def run_vad_worker(
         in_speech = False
         if speech_buffer:
             try:
-                clip_queue.put_nowait(np.concatenate(speech_buffer))
+                clip_queue.put_nowait((np.concatenate(speech_buffer), time.time()))
             except queue.Full:
                 print(
                     "[listen-daemon] transcription backlog full, dropped a clip",
@@ -296,7 +561,7 @@ def run_vad_worker(
         except queue.Empty:
             continue
 
-        if os.path.exists(PLAYBACK_FLAG):
+        if _should_gate_for_playback(VOICE_QUEUE_MODE):
             if not in_playback_gate:
                 # Playback just started - discard whatever was mid-flight
                 # rather than risk transcribing audio mixed with it.
@@ -365,14 +630,32 @@ def main() -> None:
         speech_pad_ms=SPEECH_PAD_MS,
     )
 
-    clip_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=MAX_QUEUED_CLIPS)
-    state = {"buffering": False, "stop": False, "buffer_started_at": None}
+    clip_queue: queue.Queue[tuple[np.ndarray, float]] = queue.Queue(
+        maxsize=MAX_QUEUED_CLIPS
+    )
+    state = {
+        "buffering": False,
+        "stop": False,
+        "buffer_started_at": None,
+        "capture_id": None,
+        "utterance_seq": 0,
+        "pending_trigger_timer": None,
+    }
     buf = BufferWriter(BUFFER_FILE)
+    voice_queue = None
+    if VOICE_QUEUE_MODE == "shadow":
+        try:
+            voice_queue = VoiceQueue()
+        except (OSError, sqlite3.Error) as error:
+            print(
+                f"[listen-daemon] queue unavailable: {error}",
+                file=sys.stderr,
+            )
 
     def worker() -> None:
         while not state["stop"]:
             try:
-                audio = clip_queue.get(timeout=0.5)
+                audio, vad_ended_at = clip_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -382,7 +665,7 @@ def main() -> None:
             os.unlink(clip_path)
             if text:
                 print(text, file=sys.stderr, flush=True)
-                handle_utterance(text, state, buf)
+                handle_utterance(text, state, buf, voice_queue, vad_ended_at)
 
     def watchdog() -> None:
         while not state["stop"]:
@@ -398,6 +681,8 @@ def main() -> None:
                     )
                     state["buffering"] = False
                     state["buffer_started_at"] = None
+                    state["capture_id"] = None
+                    state["utterance_seq"] = 0
                     buf.clear()
 
     # PortAudio's callback contract requires avoiding allocation, blocking,
