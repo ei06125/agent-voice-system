@@ -1,5 +1,23 @@
 # Progress against PLAN.md
 
+## Durable delivery phases 2-3 (2026-08-16)
+
+- Added schema-v2 atomic leasing, expiry recovery, renewal, retries with
+  exponential backoff, dead letters/replay, accepted-ID ledger, completion
+  tracking, retention, and acceptance latency/event records.
+- Added a Unix-socket/timed-scan worker and deterministic JSONL sink. Tests
+  cover two-worker races and the external-acceptance/database-ack crash window.
+- Added the persistent Agent SDK bridge with explicit session validation,
+  interruption, required drain-before-query, and serialized submissions.
+- Chose SDK-wrapper ownership for guaranteed mid-turn delivery. Deliver mode
+  refuses to start without `DONNA_CLAUDE_SESSION_ID`; shadow rows are excluded
+  transactionally and are never converted or replayed.
+- Changed the wake phrase to “Oh my god, Donna” and made shadow mode the safe
+  default. The legacy buffer is not written in deliver mode.
+- Added safe PID-identity playback cancellation and a launchd service template.
+  Kokoro must call `register_playback`/`unregister_playback` around its child.
+- AEC/full-duplex spoken barge-in remains future work and is not claimed.
+
 Status as of 2026-08-16, end of second working session. See `PLAN.md` for
 the original plan and `README.md` for the pipeline diagram and mechanics.
 
