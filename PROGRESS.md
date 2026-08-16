@@ -249,6 +249,43 @@ the original plan and `README.md` for the pipeline diagram and mechanics.
   building a real tuning corpus, semantic endpointing, model bakeoff)
   moved to `futurework.md` — bigger scoped efforts, not done today.
 
+**Phase 7 follow-up: self-feedback fix (DeepResearchEchoCancellation.md Mode A)**
+- User supplied a second research doc, on acoustic echo cancellation —
+  directly explaining the self-feedback loop hit live earlier this session
+  (Claude's own TTS getting picked up by the mic and misheard as a
+  command). Its decision matrix rates "pause/discard mic during TTS" as
+  low-effort/excellent-macOS-fit/implement-immediately; real full-duplex
+  AEC (Apple `AVAudioEngine` voice processing, WebRTC AEC3) are separate,
+  bigger-scope modes moved to `futurework.md`.
+- Implemented Mode A across both projects, coordinated via a new shared
+  flag file (`~/.claude/scripts/.voice-playback`), matching the existing
+  `.voice-mute`/`.voice-hook-disabled` pattern:
+  - `kokoro-local/mcp_server.py`: `speak()` touches the flag before its
+    `afplay` call(s) and removes it in a `finally` block after (so it
+    can't get stuck open if playback errors mid-call).
+  - `stt-local/listen_daemon.py`'s `run_vad_worker`: discards frames
+    entirely (no VAD call) while the flag is set — including discarding
+    any in-progress `speech_buffer` the moment playback starts, rather
+    than risk transcribing audio mixed with it. Once the flag clears, a
+    `STT_PLAYBACK_HANGOVER_MS` window (default 250ms) further discards
+    frames to clear acoustic tail/reverb, then calls `vad.reset_states()`
+    before resuming normal processing.
+  - Also fixed pre-existing lint findings in `kokoro-local/mcp_server.py`
+    while touching it: unsorted imports, non-tz-aware `datetime.now()`.
+- Verified with a mocked-VAD unit test first (discard-during-flag,
+  discard-during-hangover, resume-with-reset-after — all confirmed with
+  zero real VAD calls until after the hangover window).
+- **Live end-to-end test initially failed, correctly diagnosed as a stale
+  process, not a logic bug:** `kokoro-local` is a long-running MCP server
+  process (started at session boot) — editing `mcp_server.py` doesn't
+  hot-reload it, so the first live test ran against the pre-edit code that
+  never touched the flag at all. Confirmed via process start time (11:37AM)
+  vs. file mtime (3:03PM) — over 3 hours stale. After a session restart
+  (fresh process, confirmed via new start time), re-ran the identical live
+  test: a distinctive TTS sentence was spoken, and it did **not** appear
+  anywhere in `.voice-daemon.log` afterward — confirmed clean by checking
+  the log's last line was still the earlier failed attempt, untouched.
+
 ## Open items
 
 - **Wake phrase is in test mode.** `~/.claude/scripts/voice-listen.sh` and

@@ -50,7 +50,20 @@ Tasks/Subtasks breakdown once the bootstrap tool below exists.
   e.g. Pipecat Smart Turn, only if fixed-silence endpointing still proves
   insufficient after tuning), Phase 5 (benchmark FireRedVAD/TEN VAD/WebRTC
   against Silero on the frozen corpus — only swap on a measured win).
-  Also flagged: VAD fundamentally can't solve the self-feedback problem
-  (daemon hearing Claude's own TTS through speakers) seen live this
-  session — needs echo cancellation or a mute-during-playback policy, not
-  just threshold tuning.
+  ~~VAD fundamentally can't solve the self-feedback problem~~ — Mode A
+  (half-duplex gating, see `DeepResearchEchoCancellation.md` below)
+  resolved the practical impact of this; the underlying VAD limitation
+  itself is still true, just no longer a live problem.
+- **`DeepResearchEchoCancellation.md` — remaining modes (B/C) for real
+  barge-in.** Research doc on acoustic echo cancellation. Mode A
+  (half-duplex: discard capture during TTS playback + hangover) is done —
+  see `PROGRESS.md`. Still open, bigger scope: Mode B (Apple
+  `AVAudioEngine` + `setVoiceProcessingEnabled(true)`, native full-duplex,
+  the doc's top recommendation — needs a small Swift helper since
+  `afplay`/`sounddevice` don't use `AVAudioEngine` today) or Mode C
+  (WebRTC AEC3 via a Python/C++ bridge, more portable but bigger native
+  dependency). Either would enable true barge-in (interrupt Claude mid-
+  reply by speaking) instead of today's strict turn-taking. Also
+  documented: no evidence Claude/Anthropic watermarks or fingerprints
+  TTS/text output, so that's not a viable self-audio-detection shortcut
+  even if it seemed appealing.

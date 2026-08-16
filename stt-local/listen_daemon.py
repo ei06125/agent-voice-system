@@ -88,6 +88,16 @@ MUTE_FLAG = os.path.join(SCRIPTS_DIR, ".voice-mute")
 DISABLE_FLAG = os.path.join(SCRIPTS_DIR, ".voice-hook-disabled")
 PID_FILE = os.path.join(SCRIPTS_DIR, ".voice-daemon.pid")
 
+# Set by kokoro-local's speak() around each afplay call (see its
+# mcp_server.py) - the only signal this daemon has that DONNA's own TTS is
+# about to come out of the speaker. VAD can't tell the difference between
+# that and real speech (per DeepResearchEchoCancellation.md); discarding
+# capture while it's set, plus a short hangover after it clears, is Mode A
+# from that doc - half-duplex turn-taking, not real echo cancellation, but
+# directly fixes the self-feedback loop hit live this session.
+PLAYBACK_FLAG = os.path.join(SCRIPTS_DIR, ".voice-playback")
+PLAYBACK_HANGOVER_MS = int(os.environ.get("STT_PLAYBACK_HANGOVER_MS", "250"))
+
 # Testing wake phrase while validating the local STT engine - matches the
 # one used by the old voice-listen.sh gate. Production phrase (swap in
 # once confident the wake word itself is the only remaining unknown):
@@ -277,11 +287,37 @@ def run_vad_worker(
         if reason == "max_duration":
             vad.reset_states()
 
+    in_playback_gate = False
+    hangover_until: float | None = None
+
     while not state["stop"]:
         try:
             chunk = frame_queue.get(timeout=0.5)
         except queue.Empty:
             continue
+
+        if os.path.exists(PLAYBACK_FLAG):
+            if not in_playback_gate:
+                # Playback just started - discard whatever was mid-flight
+                # rather than risk transcribing audio mixed with it.
+                in_speech = False
+                speech_buffer.clear()
+                preroll.clear()
+            in_playback_gate = True
+            hangover_until = None
+            continue
+
+        if in_playback_gate:
+            if hangover_until is None:
+                hangover_until = time.time() + PLAYBACK_HANGOVER_MS / 1000
+            if time.time() < hangover_until:
+                continue
+            # Hangover elapsed - resume with a clean VAD state so residual
+            # playback tail/reverb doesn't get mistaken for speech onset.
+            vad.reset_states()
+            in_playback_gate = False
+            hangover_until = None
+
         event = vad(chunk)
         if event is not None and "start" in event:
             in_speech = True
