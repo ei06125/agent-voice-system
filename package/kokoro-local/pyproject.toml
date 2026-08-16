@@ -1,0 +1,11 @@
+[project]
+name = "kokoro-local"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "kokoro>=0.9.4",
+    "mcp>=1.28.1",
+    "soundfile>=0.14.0",
+]

@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "stt-local": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "/absolute/path/to/DONNA/stt-local",
+        "python",
+        "/absolute/path/to/DONNA/stt-local/mcp_server.py"
+      ],
+      "env": {}
+    },
+    "kokoro-local": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "/absolute/path/to/.mcp/kokoro-local",
+        "python",
+        "/absolute/path/to/.mcp/kokoro-local/mcp_server.py"
+      ],
+      "env": {}
+    }
+  }
+}
