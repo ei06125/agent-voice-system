@@ -18,9 +18,12 @@ Tasks/Subtasks breakdown once the bootstrap tool below exists.
   Resolved — see `PROGRESS.md`. `voice-stop-hook.sh` now polls the buffer
   for up to an hour per Stop event instead of checking once and
   returning, with a PID-file lock so only one poller runs at a time.
-  Still unverified: whether `exit 2` can interrupt an actively-generating
-  turn, or only deliver once the current turn naturally ends — no way to
-  test that boundary from inside a single conversation.
+  Confirmed live that delivery can interrupt an actively-generating turn,
+  not just land at a clean boundary.
+- **~~Buffer age-expiry destroyed real content during a long turn.~~**
+  Resolved — see `PROGRESS.md`. Raised `MAX_BUFFER_AGE_SECONDS` from 300
+  to 1260 (21 min) after it silently expired a real monologue while a
+  poller hadn't spawned yet.
 - **Revert the wake phrase from test mode.** `stt-local/listen_daemon.py`
   and `~/.claude/scripts/voice-listen.sh` (now dead code, see below) both
   match `"testing 1, 2, 3"` instead of the production phrase. Revert once

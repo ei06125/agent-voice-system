@@ -186,9 +186,29 @@ the original plan and `README.md` for the pipeline diagram and mechanics.
   Added a PID-file lock so frequent Stop events during normal chat don't
   spawn overlapping pollers racing on the same buffer file. Verified in
   isolation (dedup, delivery, cleanup all confirmed with a self-contained
-  test harness) — **still unverified whether `exit 2` can interrupt an
-  actively-generating turn or only delivers at the next natural turn
-  boundary**, no way to test that distinction from inside one conversation.
+  test harness) — **confirmed live: a notification landed attached to an
+  in-progress tool-call turn**, not only at a clean turn boundary, so the
+  poller can interrupt actively-generating work, not just idle time.
+- **Bug found and fixed: the 5-minute buffer age-expiry (added earlier
+  this same phase) silently destroyed a real, undelivered monologue.**
+  Root cause: the wake phrase triggered buffering while Claude was still
+  deep in one long uninterrupted turn (building the poller itself, plus
+  ring buffers, plus committing) — no Stop event fired for well over 5
+  minutes, so by the time a poller finally spawned and started watching,
+  the watchdog had already expired and cleared the whole capture. The fix
+  for unbounded memory growth ended up eating real content, in exactly
+  the long-turn scenario that motivated building the poller in the first
+  place. Diagnosed live: verified the poller itself was healthy (a
+  manually-injected test line delivered correctly within seconds) and the
+  buffer was already empty *before* that injection — pointing straight at
+  the watchdog. Raised `MAX_BUFFER_AGE_SECONDS` default from 300 to 1260
+  (21 minutes, user's call) — the line-count/queue caps already bound
+  worst-case memory, so age-expiry only needs to catch genuinely abandoned
+  captures now, not routine long turns. Confirmed nothing was actually
+  lost from a record-keeping standpoint — `listen_daemon.py` logs every
+  transcribed utterance regardless of buffering/delivery state, so the
+  full raw content was recoverable by reading `.voice-daemon.log` directly
+  even though the automatic notification never fired.
 
 ## Open items
 

@@ -63,8 +63,12 @@ MAX_QUEUED_CLIPS = int(os.environ.get("STT_MAX_QUEUED_CLIPS", 10))
 # A capture nothing drains (Claude busy for a long stretch, or just never
 # checks back in) shouldn't sit around forever - expire it after this many
 # seconds since the wake phrase that started it, checked by a watchdog
-# thread every WATCHDOG_INTERVAL_SECONDS.
-MAX_BUFFER_AGE_SECONDS = int(os.environ.get("STT_MAX_BUFFER_AGE_SECONDS", 300))
+# thread every WATCHDOG_INTERVAL_SECONDS. 300s (5min) was too aggressive -
+# a real monologue got silently destroyed by this expiry while Claude was
+# legitimately still mid-turn (building the very poller meant to catch
+# it). Line-count/queue caps already bound worst-case memory, so this only
+# needs to catch genuinely abandoned captures, not routine long turns.
+MAX_BUFFER_AGE_SECONDS = int(os.environ.get("STT_MAX_BUFFER_AGE_SECONDS", 21 * 60))
 WATCHDOG_INTERVAL_SECONDS = 10
 
 SCRIPTS_DIR = os.path.expanduser("~/.claude/scripts")
