@@ -46,7 +46,7 @@ DEVICE_PRIORITY = [
     if p.strip()
 ]
 THRESHOLD = 0.5
-MIN_SILENCE_MS = int(os.environ.get("STT_MIN_SILENCE_MS", 500))
+MIN_SILENCE_MS = int(os.environ.get("STT_MIN_SILENCE_MS", "500"))
 SPEECH_PAD_MS = 200
 
 WHISPER_BIN = "/opt/homebrew/bin/whisper-cli"
@@ -57,8 +57,8 @@ WHISPER_MODEL = os.path.normpath(
 # Bounds so an undrained buffer (Claude busy, no session ending a turn for
 # a while) or a backed-up transcription worker can't grow memory/disk
 # without limit.
-MAX_BUFFER_LINES = int(os.environ.get("STT_MAX_BUFFER_LINES", 200))
-MAX_QUEUED_CLIPS = int(os.environ.get("STT_MAX_QUEUED_CLIPS", 10))
+MAX_BUFFER_LINES = int(os.environ.get("STT_MAX_BUFFER_LINES", "200"))
+MAX_QUEUED_CLIPS = int(os.environ.get("STT_MAX_QUEUED_CLIPS", "10"))
 
 # A capture nothing drains (Claude busy for a long stretch, or just never
 # checks back in) shouldn't sit around forever - expire it after this many
@@ -68,7 +68,7 @@ MAX_QUEUED_CLIPS = int(os.environ.get("STT_MAX_QUEUED_CLIPS", 10))
 # legitimately still mid-turn (building the very poller meant to catch
 # it). Line-count/queue caps already bound worst-case memory, so this only
 # needs to catch genuinely abandoned captures, not routine long turns.
-MAX_BUFFER_AGE_SECONDS = int(os.environ.get("STT_MAX_BUFFER_AGE_SECONDS", 21 * 60))
+MAX_BUFFER_AGE_SECONDS = int(os.environ.get("STT_MAX_BUFFER_AGE_SECONDS", str(21 * 60)))
 WATCHDOG_INTERVAL_SECONDS = 10
 
 SCRIPTS_DIR = os.path.expanduser("~/.claude/scripts")
@@ -110,7 +110,7 @@ def find_device() -> int:
             for idx, dev in enumerate(devices):
                 if "airpods" in dev["name"].lower() and dev["max_input_channels"] > 0:
                     return idx
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - backend-specific, fall through
         pass
 
     for pattern in DEVICE_PRIORITY:
@@ -128,12 +128,15 @@ def transcribe(path: str) -> str:
         [WHISPER_BIN, "-m", WHISPER_MODEL, "-f", path, "-nt", "-np", "-sns"],
         capture_output=True,
         text=True,
+        check=False,
     )
     return result.stdout.strip()
 
 
 def afplay_async(path: str) -> None:
-    subprocess.Popen(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(
+        ["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
 
 
 class BufferWriter:
@@ -145,7 +148,7 @@ class BufferWriter:
 
     def __init__(self, path: str):
         self.path = path
-        self.lines: "deque[str]" = deque(maxlen=MAX_BUFFER_LINES)
+        self.lines: deque[str] = deque(maxlen=MAX_BUFFER_LINES)
         self._known_size = self._current_size()
 
     def _current_size(self) -> int:
@@ -220,7 +223,7 @@ def handle_utterance(text: str, state: dict, buf: BufferWriter) -> None:
         state["buffering"] = True
         state["buffer_started_at"] = time.time()
         afplay_async("/System/Library/Sounds/Tink.aiff")
-        remainder = text[m.end():].strip()
+        remainder = text[m.end() :].strip()
         if remainder:
             buf.append(remainder)
     else:
@@ -253,7 +256,7 @@ def main() -> None:
         speech_pad_ms=SPEECH_PAD_MS,
     )
 
-    clip_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=MAX_QUEUED_CLIPS)
+    clip_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=MAX_QUEUED_CLIPS)
     state = {"buffering": False, "stop": False, "buffer_started_at": None}
     buf = BufferWriter(BUFFER_FILE)
 
@@ -291,8 +294,10 @@ def main() -> None:
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
 
-    preroll_frames = max(1, math.ceil((SPEECH_PAD_MS / 1000) * SAMPLE_RATE / FRAME_SAMPLES))
-    preroll: "deque[np.ndarray]" = deque(maxlen=preroll_frames)
+    preroll_frames = max(
+        1, math.ceil((SPEECH_PAD_MS / 1000) * SAMPLE_RATE / FRAME_SAMPLES)
+    )
+    preroll: deque[np.ndarray] = deque(maxlen=preroll_frames)
     speech_buffer: list[np.ndarray] = []
     in_speech = False
 
@@ -317,8 +322,7 @@ def main() -> None:
                     clip_queue.put_nowait(np.concatenate(speech_buffer))
                 except queue.Full:
                     print(
-                        "[listen-daemon] transcription backlog full, "
-                        "dropped a clip",
+                        "[listen-daemon] transcription backlog full, " "dropped a clip",
                         file=sys.stderr,
                     )
             speech_buffer.clear()

@@ -36,7 +36,7 @@ DEVICE_PRIORITY = [
     if p.strip()
 ]
 THRESHOLD = 0.5
-MIN_SILENCE_MS = int(os.environ.get("STT_MIN_SILENCE_MS", 500))
+MIN_SILENCE_MS = int(os.environ.get("STT_MIN_SILENCE_MS", "500"))
 SPEECH_PAD_MS = 200
 
 WHISPER_BIN = "/opt/homebrew/bin/whisper-cli"
@@ -59,7 +59,7 @@ def find_device() -> int:
             for idx, dev in enumerate(devices):
                 if "airpods" in dev["name"].lower() and dev["max_input_channels"] > 0:
                     return idx
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - backend-specific, fall through
         pass
 
     for pattern in DEVICE_PRIORITY:
@@ -79,6 +79,7 @@ def transcribe(path: str) -> str:
         [WHISPER_BIN, "-m", WHISPER_MODEL, "-f", path, "-nt", "-np", "-sns"],
         capture_output=True,
         text=True,
+        check=False,
     )
     return result.stdout.strip()
 
@@ -112,7 +113,7 @@ def main() -> None:
         speech_pad_ms=SPEECH_PAD_MS,
     )
 
-    clip_queue: "queue.Queue[np.ndarray]" = queue.Queue()
+    clip_queue: queue.Queue[np.ndarray] = queue.Queue()
     threading.Thread(target=worker, args=(clip_queue,), daemon=True).start()
 
     # VADIterator's 'start' event reports a start sample that already backs
@@ -120,8 +121,10 @@ def main() -> None:
     # available. Keep a rolling buffer of recent frames so that pre-roll is
     # actually there to prepend, instead of losing the first word to the
     # few frames Silero needs to cross the speech threshold.
-    preroll_frames = max(1, math.ceil((SPEECH_PAD_MS / 1000) * SAMPLE_RATE / FRAME_SAMPLES))
-    preroll: "deque[np.ndarray]" = deque(maxlen=preroll_frames)
+    preroll_frames = max(
+        1, math.ceil((SPEECH_PAD_MS / 1000) * SAMPLE_RATE / FRAME_SAMPLES)
+    )
+    preroll: deque[np.ndarray] = deque(maxlen=preroll_frames)
 
     speech_buffer: list[np.ndarray] = []
     in_speech = False
