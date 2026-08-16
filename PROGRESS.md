@@ -210,6 +210,45 @@ the original plan and `README.md` for the pipeline diagram and mechanics.
   full raw content was recoverable by reading `.voice-daemon.log` directly
   even though the automatic notification never fired.
 
+**Phase 7 follow-up: lint/format pass + real-time capture safety (DeepResearchVAD.md Phase 1)**
+- Ran `black` + `ruff` (via `uvx`, no dev deps added) on all three
+  `stt-local` Python files. Auto-fixed 5 findings, manually fixed the rest:
+  string defaults for `os.environ.get()` calls (`PLW1508`), explicit
+  `check=False` on `subprocess.run` (`PLW1510`), noqa'd the intentional
+  broad `except Exception` in `find_device()` (device-query failures are
+  backend-specific; deliberate fallback to the priority list).
+- User supplied `DeepResearchVAD.md`, a research doc on local VAD/tooling
+  scoped to this exact pipeline. Implemented its Phase 1 (make capture
+  real-time safe):
+  - **Bug the doc caught that the earlier ring-buffer pass missed:** VAD
+    inference (`vad(chunk)`) ran directly inside the PortAudio audio
+    callback in both `listen_daemon.py` and `vad_listen.py` — violates
+    PortAudio's own callback contract (must avoid allocation, blocking,
+    unpredictable-duration work), real risk of audio dropouts under load.
+    Fixed in both files: extracted a module-level `run_vad_worker()`
+    (VAD inference + segmentation, unit-testable with a mocked VAD
+    callable) that runs on its own thread, fed by a new bounded
+    `frame_queue` (`STT_MAX_QUEUED_FRAMES`, default 50) that the callback
+    only does a non-blocking copy-and-enqueue into — no inference, no
+    concatenation, no I/O on the audio thread anymore.
+  - **Also fixed: `speech_buffer` (raw audio during one continuous
+    in-speech run) had no size cap.** If VAD ever misclassifies sustained
+    non-speech (music, noise, feedback) as speech, it never fires an "end"
+    event and the buffer grows unbounded (~230MB/hour at 16kHz float32
+    mono). Added `MAX_UTTERANCE_SECONDS` (default 30) — force-flushes
+    whatever's accumulated and calls `vad.reset_states()` to keep VAD's
+    internal state consistent with the forced cut.
+  - Verified with synthetic mocked-VAD unit tests (both files): normal
+    VAD-end flush still produces the correct clip with no spurious
+    `reset_states()` call; force-flush at the duration cap produces the
+    correct clip and does call `reset_states()`. Then live-verified:
+    daemon restarted cleanly against the real mic/model, existing
+    keyword-detection tests still pass unchanged, and it's still
+    transcribing correctly.
+- Remaining `DeepResearchVAD.md` phases (persistent whisper.cpp process,
+  building a real tuning corpus, semantic endpointing, model bakeoff)
+  moved to `futurework.md` — bigger scoped efforts, not done today.
+
 ## Open items
 
 - **Wake phrase is in test mode.** `~/.claude/scripts/voice-listen.sh` and

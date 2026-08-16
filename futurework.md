@@ -40,3 +40,17 @@ Tasks/Subtasks breakdown once the bootstrap tool below exists.
   description still reflects the pre-migration `dg listen`/`dg speak`
   design in spots, deferred pending confidence that the local pipeline is
   fully settled.
+- **`DeepResearchVAD.md` — remaining phases (2-5).** Research doc on local
+  VAD/tooling. Phase 1 (real-time-safe capture) is done — see
+  `PROGRESS.md`. Still open: Phase 2 (persistent whisper.cpp
+  process/context instead of a cold-started `subprocess.run` per
+  utterance — likely the biggest remaining latency win), Phase 3 (build a
+  recorded/annotated test corpus, tune threshold/padding/endpoint policy
+  against it rather than by feel), Phase 4 (semantic endpointing layer,
+  e.g. Pipecat Smart Turn, only if fixed-silence endpointing still proves
+  insufficient after tuning), Phase 5 (benchmark FireRedVAD/TEN VAD/WebRTC
+  against Silero on the frozen corpus — only swap on a measured win).
+  Also flagged: VAD fundamentally can't solve the self-feedback problem
+  (daemon hearing Claude's own TTS through speakers) seen live this
+  session — needs echo cancellation or a mute-during-playback policy, not
+  just threshold tuning.

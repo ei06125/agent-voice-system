@@ -60,6 +60,17 @@ WHISPER_MODEL = os.path.normpath(
 MAX_BUFFER_LINES = int(os.environ.get("STT_MAX_BUFFER_LINES", "200"))
 MAX_QUEUED_CLIPS = int(os.environ.get("STT_MAX_QUEUED_CLIPS", "10"))
 
+# Raw audio frames waiting for the VAD worker (should rarely queue up at
+# all - each frame is 32ms and VAD inference is much faster than that -
+# but bounded rather than unbounded in case the worker ever falls behind).
+MAX_QUEUED_FRAMES = int(os.environ.get("STT_MAX_QUEUED_FRAMES", "50"))
+
+# Hard cap on one continuous in-speech run: without this, VAD misclassifying
+# sustained non-speech (music, noise, feedback) as speech means it never
+# fires an "end" event and speech_buffer grows without limit. Force-flush
+# past this many seconds rather than waiting indefinitely for silence.
+MAX_UTTERANCE_SECONDS = float(os.environ.get("STT_MAX_UTTERANCE_SECONDS", "30"))
+
 # A capture nothing drains (Claude busy for a long stretch, or just never
 # checks back in) shouldn't sit around forever - expire it after this many
 # seconds since the wake phrase that started it, checked by a watchdog
@@ -230,6 +241,68 @@ def handle_utterance(text: str, state: dict, buf: BufferWriter) -> None:
         buf.append(text)
 
 
+def run_vad_worker(
+    frame_queue: "queue.Queue[np.ndarray]",
+    clip_queue: "queue.Queue[np.ndarray]",
+    vad: VADIterator,
+    state: dict,
+) -> None:
+    """Owns VAD inference and utterance segmentation. Runs on a normal
+    thread, fed by the audio callback's frame_queue, so ONNX inference
+    never runs inside the real-time PortAudio callback (which must avoid
+    allocation, blocking, and unpredictable-duration work)."""
+    preroll_frames = max(
+        1, math.ceil((SPEECH_PAD_MS / 1000) * SAMPLE_RATE / FRAME_SAMPLES)
+    )
+    preroll: deque[np.ndarray] = deque(maxlen=preroll_frames)
+    speech_buffer: list[np.ndarray] = []
+    in_speech = False
+    max_utterance_frames = max(
+        1, math.ceil(MAX_UTTERANCE_SECONDS * SAMPLE_RATE / FRAME_SAMPLES)
+    )
+
+    def flush(reason: str) -> None:
+        nonlocal in_speech
+        in_speech = False
+        if speech_buffer:
+            try:
+                clip_queue.put_nowait(np.concatenate(speech_buffer))
+            except queue.Full:
+                print(
+                    "[listen-daemon] transcription backlog full, dropped a clip",
+                    file=sys.stderr,
+                )
+        speech_buffer.clear()
+        preroll.clear()
+        if reason == "max_duration":
+            vad.reset_states()
+
+    while not state["stop"]:
+        try:
+            chunk = frame_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        event = vad(chunk)
+        if event is not None and "start" in event:
+            in_speech = True
+            speech_buffer.clear()
+            speech_buffer.extend(preroll)
+        if in_speech:
+            speech_buffer.append(chunk)
+            if len(speech_buffer) >= max_utterance_frames:
+                print(
+                    f"[listen-daemon] utterance exceeded "
+                    f"{MAX_UTTERANCE_SECONDS:.0f}s, force-flushing",
+                    file=sys.stderr,
+                )
+                flush("max_duration")
+                continue
+        else:
+            preroll.append(chunk)
+        if event is not None and "end" in event:
+            flush("vad_end")
+
+
 def main() -> None:
     # A prior run's buffer file survives a stop/start cycle on disk (only
     # in-memory state resets) - stale undrained content from before a
@@ -291,42 +364,27 @@ def main() -> None:
                     state["buffer_started_at"] = None
                     buf.clear()
 
+    # PortAudio's callback contract requires avoiding allocation, blocking,
+    # and unpredictable-duration work (ONNX inference, buffer concatenation,
+    # I/O) - a short inference often works, but risks dropouts under
+    # scheduler pressure. The callback below only copies frames into a
+    # bounded queue; VAD inference and segmentation run in run_vad_worker,
+    # on a normal worker thread instead.
+    frame_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=MAX_QUEUED_FRAMES)
+
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
-
-    preroll_frames = max(
-        1, math.ceil((SPEECH_PAD_MS / 1000) * SAMPLE_RATE / FRAME_SAMPLES)
-    )
-    preroll: deque[np.ndarray] = deque(maxlen=preroll_frames)
-    speech_buffer: list[np.ndarray] = []
-    in_speech = False
+    threading.Thread(
+        target=run_vad_worker, args=(frame_queue, clip_queue, vad, state), daemon=True
+    ).start()
 
     def callback(indata, frames, time_info, status):
-        nonlocal in_speech
         if status:
             print(f"[listen-daemon] stream status: {status}", file=sys.stderr)
-        chunk = indata[:, 0].copy()
-        event = vad(chunk)
-        if event is not None and "start" in event:
-            in_speech = True
-            speech_buffer.clear()
-            speech_buffer.extend(preroll)
-        if in_speech:
-            speech_buffer.append(chunk)
-        else:
-            preroll.append(chunk)
-        if event is not None and "end" in event:
-            in_speech = False
-            if speech_buffer:
-                try:
-                    clip_queue.put_nowait(np.concatenate(speech_buffer))
-                except queue.Full:
-                    print(
-                        "[listen-daemon] transcription backlog full, " "dropped a clip",
-                        file=sys.stderr,
-                    )
-            speech_buffer.clear()
-            preroll.clear()
+        try:
+            frame_queue.put_nowait(indata[:, 0].copy())
+        except queue.Full:
+            print("[listen-daemon] VAD backlog full, dropped a frame", file=sys.stderr)
 
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
