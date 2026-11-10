@@ -17,7 +17,7 @@ DONNA_CLAUDE_SESSION_ID=<the-session-owned-by-the-SDK-wrapper>
 Start the bridge (or install the launchd template under `ops/`):
 
 ```sh
-uv run --project stt-local python stt-local/delivery_worker.py \
+uv run python -m donna.orchestration.delivery_worker \
   --session "$DONNA_CLAUDE_SESSION_ID"
 ```
 
@@ -29,17 +29,17 @@ the one-second target. A stock terminal remains a fallback without that SLA.
 Operations:
 
 ```sh
-uv run --project stt-local python stt-local/voice_queue.py status
-uv run --project stt-local python stt-local/voice_queue.py health
-uv run --project stt-local python stt-local/voice_queue.py list --limit 20
-uv run --project stt-local python stt-local/voice_queue.py replay MESSAGE_ID
-uv run --project stt-local python stt-local/voice_queue.py prune --completed-older-than-days 30
+uv run python -m donna.orchestration.voice_queue status
+uv run python -m donna.orchestration.voice_queue health
+uv run python -m donna.orchestration.voice_queue list --limit 20
+uv run python -m donna.orchestration.voice_queue replay MESSAGE_ID
+uv run python -m donna.orchestration.voice_queue prune --completed-older-than-days 30
 ```
 
 Dead letters and pending rows are never pruned. Transcript text is hidden from
 inspection unless `--include-text` is explicitly requested. The production
 wake phrase is “Oh my god, Donna”. Point the typed-prompt cancellation hook at
-`python stt-local/playback_control.py cancel`. Kokoro registers the exact
+`uv run python -m donna.text_to_speech.playback_control cancel`. Kokoro registers the exact
 playback child with `register_playback()` and removes it in `finally` with
 `unregister_playback()`; a PID start token prevents terminating an unrelated
 reused PID. Queued prompts call the same controller before SDK submission.
@@ -55,7 +55,8 @@ speech-to-text and text-to-speech.
 ## Signal path
 
 One full cycle of the loop, mic to speaker. Copper stages are the local
-STT/TTS engine (Silero VAD + whisper.cpp + kokoro-local, see `PLAN.md`);
+STT/TTS engine (Silero VAD + whisper.cpp + kokoro-local, see
+`docs/Technical/ARCHITECTURE/PLAN.md`);
 slate stages are the wake-word gate, debounce, and Stop-hook wiring
 carried over unchanged from the original `dg listen`/`dg speak` build.
 

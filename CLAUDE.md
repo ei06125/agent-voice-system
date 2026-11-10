@@ -2,7 +2,7 @@
 
 ## Current status
 
-Phases 1-3 of `VOICE_DELIVERY_PLAN.md` are implemented. Production cutover
+Phases 1-3 of `docs/Technical/ARCHITECTURE/VOICE_DELIVERY_PLAN.md` are implemented. Production cutover
 requires launching the SDK-owned session and setting its session ID.
 
 - The microphone daemon, Silero VAD, Whisper transcription, wake gate, legacy text buffer, and Stop-hook delivery remain operational.
@@ -24,9 +24,9 @@ requires launching the SDK-owned session and setting its session ID.
 
 | Component | Path or interface | Role |
 |---|---|---|
-| Listener daemon | `stt-local/listen_daemon.py` | Microphone, VAD, Whisper, wake/control phrases, legacy buffer, shadow queue producer |
-| Listener MCP server | `stt-local/mcp_server.py` | Exposes `start_listener` and `stop_listener` |
-| Durable queue | `stt-local/voice_queue.py` | SQLite schema, atomic enqueue, notification, inspection |
+| Listener daemon | `src/donna/speech_to_text/listen_daemon.py` | Microphone, VAD, Whisper, wake/control phrases, legacy buffer, shadow queue producer |
+| Listener MCP server | `src/donna/tools/stt_mcp_server.py` | Exposes `start_listener`, `stop_listener`, and `check_readiness` |
+| Durable queue | `src/donna/orchestration/voice_queue.py` | SQLite schema, atomic enqueue, notification, inspection |
 | Legacy buffer | `$HOME/.claude/scripts/.voice-buffer.txt` | Current Stop-hook delivery source |
 | Listener log | `$HOME/.claude/scripts/.voice-daemon.log` | Runtime diagnostics |
 | Queue database | `$HOME/.claude/donna/voice-delivery.sqlite3` | Durable shadow messages |
@@ -68,8 +68,7 @@ Environment changes do not affect an already-running MCP server or detached list
 If changing MCP configuration is not desired, run a foreground diagnostic listener from the repository root:
 
 ```sh
-cd stt-local
-DONNA_VOICE_QUEUE_MODE=shadow uv run python listen_daemon.py
+DONNA_VOICE_QUEUE_MODE=shadow uv run python -m donna.speech_to_text.listen_daemon
 ```
 
 Stop the foreground diagnostic with `Ctrl-C`. Do not run it while the MCP-managed daemon is active.
@@ -78,11 +77,20 @@ Stop the foreground diagnostic with `Ctrl-C`. Do not run it while the MCP-manage
 
 When the user explicitly requests voice mode:
 
-1. Call `mcp__stt-local__start_listener`.
+1. Call `mcp__stt-local__check_readiness` before telling the user it is safe to
+   speak. It starts the listener if needed and reports `ready: true/false`
+   plus a `problems` list covering the listener process, queue mode, the
+   hook-disabled flag, and queue reachability. `mcp__stt-local__start_listener`
+   remains available directly if a readiness check isn't wanted.
 2. If it reports `already running`, do not start another process.
 3. Leave the listener running across Claude turns. Do not stop and restart it after every response.
 4. In shadow mode only, the old Stop hook remains the compatibility path.
 5. Call `mcp__stt-local__stop_listener` when the user asks to stop microphone capture.
+
+`check_readiness` only verifies the shadow-mode Stop-hook path used to reach
+*this* interactive session. It does not start or check `delivery_worker.py` -
+that process drives a separate, Agent-SDK-owned session and is unrelated to
+whether this terminal can hear you.
 
 The production wake phrase is:
 
@@ -110,19 +118,19 @@ The file `$HOME/.claude/scripts/.voice-hook-disabled` blocks wake-authorized com
 Run from the repository root:
 
 ```sh
-uv run --project stt-local python stt-local/voice_queue.py status
+uv run python -m donna.orchestration.voice_queue status
 ```
 
 List message metadata without transcript text:
 
 ```sh
-uv run --project stt-local python stt-local/voice_queue.py list --limit 20
+uv run python -m donna.orchestration.voice_queue list --limit 20
 ```
 
 Only when the user asks to inspect transcript content:
 
 ```sh
-uv run --project stt-local python stt-local/voice_queue.py list --limit 20 --include-text
+uv run python -m donna.orchestration.voice_queue list --limit 20 --include-text
 ```
 
 Expected Phase 1 rows:

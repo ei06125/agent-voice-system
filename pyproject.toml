@@ -1,0 +1,44 @@
+[project]
+name = "donna"
+version = "0.1.0"
+description = "Local-first modular voice-agent system"
+requires-python = ">=3.12"
+dependencies = [
+    "claude-agent-sdk>=0.2.139",
+    "kokoro>=0.9.4",
+    "mcp==1.28.1",
+    "numpy>=2.5.2",
+    "onnxruntime>=1.28.0",
+    "silero-vad-notorch>=6.2.1.1",
+    "sounddevice>=0.5.5",
+    "soundfile>=0.14.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+donna-kokoro-mcp = "donna.text_to_speech.kokoro_mcp_server:main"
+donna-kokoro-speak = "donna.text_to_speech.speak_cli:main"
+donna-stt-mcp = "donna.tools.stt_mcp_server:main"
+donna-voice-loop = "donna.orchestration.voice_loop:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["src", "qa"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/donna"]

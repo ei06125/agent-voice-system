@@ -4,8 +4,8 @@
   <key>Label</key><string>com.donna.voice-delivery</string>
   <key>ProgramArguments</key><array>
     <string>/opt/homebrew/bin/uv</string><string>run</string>
-    <string>--project</string><string>/Users/pedro/_/AGENTS/DONNA/stt-local</string>
-    <string>python</string><string>/Users/pedro/_/AGENTS/DONNA/stt-local/delivery_worker.py</string>
+    <string>--project</string><string>/Users/pedro/_/AGENTS/DONNA</string>
+    <string>python</string><string>-m</string><string>donna.orchestration.delivery_worker</string>
     <string>--session</string><string>REPLACE_WITH_OWNED_SDK_SESSION_ID</string>
   </array>
   <key>WorkingDirectory</key><string>/Users/pedro/_/AGENTS/DONNA</string>

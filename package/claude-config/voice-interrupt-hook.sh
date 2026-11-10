@@ -13,8 +13,8 @@
 # Never blocks prompt submission: always exits 0.
 set -uo pipefail
 
-uv run --project "$HOME/_/AGENTS/DONNA/stt-local" \
-  python "$HOME/_/AGENTS/DONNA/stt-local/playback_control.py" cancel \
+uv run --project "$HOME/_/AGENTS/DONNA" \
+  python -m donna.text_to_speech.playback_control cancel \
   >/dev/null 2>&1
 
 exit 0

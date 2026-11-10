@@ -1,0 +1,72 @@
+{
+  "env": {
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://localhost:11434/*)",
+      "Bash(curl -s -X POST https://api.github.com/gists*)",
+      "Bash(curl -s -X PATCH https://api.github.com/gists/*)",
+      "Bash(curl -s https://api.github.com/*)",
+      "Bash(curl -s https://slack.com/api/*)",
+      "Bash(curl -s -X POST https://slack.com/api/*)",
+      "mcp__kokoro-local__speak"
+    ],
+    "deny": []
+  },
+  "model": "sonnet",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/voice-interrupt-hook.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/voice-stop-hook.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "rust-analyzer-lsp@claude-plugins-official": true,
+    "clangd-lsp@claude-plugins-official": true,
+    "caveman@caveman": true,
+    "swift-lsp@claude-plugins-official": true,
+    "slack@claude-plugins-official": true,
+    "deepgram@deepgram-agent-skills": true
+  },
+  "extraKnownMarketplaces": {
+    "caveman": {
+      "source": {
+        "source": "github",
+        "repo": "JuliusBrussee/caveman"
+      }
+    },
+    "deepgram-agent-skills": {
+      "source": {
+        "source": "github",
+        "repo": "deepgram/skills"
+      }
+    }
+  },
+  "effortLevel": "xhigh",
+  "voice": {
+    "enabled": true,
+    "mode": "tap"
+  },
+  "theme": "dark",
+  "editorMode": "normal",
+  "voiceEnabled": true
+}

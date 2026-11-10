@@ -11,7 +11,7 @@ the system behaves once it's running; this is just the install path.
 - [Homebrew](https://brew.sh).
 - [`uv`](https://docs.astral.sh/uv/) for Python dependency management.
 - `whisper-cli`: `brew install whisper-cpp` (must resolve to
-  `/opt/homebrew/bin/whisper-cli` - `stt-local/listen_daemon.py`'s
+  `/opt/homebrew/bin/whisper-cli` - `src/donna/speech_to_text/listen_daemon.py`'s
   `WHISPER_BIN` constant is hardcoded to that path; edit it if your
   Homebrew prefix differs, e.g. Intel Macs at `/usr/local`).
 - `gitleaks`: `brew install gitleaks` (required by `.githooks/pre-commit`,
@@ -23,7 +23,6 @@ the system behaves once it's running; this is just the install path.
 git clone git@github.com:ei06125/agent-voice-system.git DONNA
 cd DONNA
 git config core.hooksPath .githooks   # activates the test + gitleaks pre-commit hook
-cd stt-local
 uv sync
 ```
 
@@ -31,31 +30,18 @@ uv sync
 
 `models/` is gitignored (large binaries) - the daemon expects
 `models/ggml-base.en.bin` (whisper.cpp base English model, ~148MB) at the
-repo root, one level up from `stt-local/`:
+repository root:
 
 ```sh
-mkdir -p ../models
-curl -L -o ../models/ggml-base.en.bin \
+mkdir -p models
+curl -L -o models/ggml-base.en.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 ```
 
-## 3. Install the Kokoro TTS MCP server
+## 3. Install the unified local stack
 
-This is a *separate* project from the main repo (it's user-scoped, not
-per-project, since multiple Claude Code sessions share it) - copy it out
-of `package/kokoro-local/` to wherever you keep user-scoped MCP servers,
-conventionally `~/.mcp/kokoro-local/`:
-
-```sh
-mkdir -p ~/.mcp/kokoro-local
-cp package/kokoro-local/*.py package/kokoro-local/pyproject.toml package/kokoro-local/uv.lock ~/.mcp/kokoro-local/
-cd ~/.mcp/kokoro-local
-uv sync
-```
-
-Edit `mcp_server.py`'s `sys.path.insert(0, os.path.expanduser("~/_/AGENTS/DONNA/stt-local"))`
-line to point at wherever you cloned the main repo - it imports
-`playback_control` from there for the barge-in kill contract.
+Kokoro TTS, STT, orchestration, and MCP tools are all in the root `src/donna/`
+package. The `uv sync` command above installs the complete local stack.
 
 ## 4. Register both MCP servers
 
@@ -91,8 +77,7 @@ reconnecting the specific MCP servers) - restart Claude Code, or use
 From the repo root:
 
 ```sh
-cd stt-local
-uv run --with pytest pytest -q      # should be 40 passed
+uv run --with pytest pytest -q
 ```
 
 Then in Claude Code, call `mcp__stt-local__start_listener` and say "Donna"
@@ -112,11 +97,10 @@ listener can't hear a command to restart itself).
 ## What's NOT packaged here
 
 - `models/ggml-base.en.bin` - too large for git, see step 2.
-- Anything from `stt-local/voice_queue.py` / `delivery_worker.py` /
-  `claude_bridge.py`'s Agent SDK bridge path - that's a working but
+- The Agent SDK bridge path under `src/donna/orchestration/` - that's a working but
   currently-unused alternate delivery mechanism (a second, SDK-owned
   Claude session as the replier). See `STATUS.md` and `CLAUDE.md` if you
   want to stand that up instead of/alongside the direct-file design this
   package sets up. It needs `claude-agent-sdk` (already in
-  `stt-local/pyproject.toml`) and a dedicated Claude session ID that no
+  `pyproject.toml`) and a dedicated Claude session ID that no
   stock Claude Code terminal is concurrently using.
