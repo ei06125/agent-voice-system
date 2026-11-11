@@ -1,196 +1,277 @@
-# DONNA — durable low-latency voice delivery for Claude
+# DONNA
 
-Donna now has an SDK-owned delivery path that does not wait for a Claude Code
-`Stop` event. The listener commits finalized wake-authorized commands to
-SQLite, wakes a persistent worker over a Unix datagram socket, and the worker
-interrupts/drains/submits through one persistent `ClaudeSDKClient` session.
-SQLite remains authoritative when notifications or processes fail.
+Ambient voice for Claude Code. While a session runs, the microphone is
+transcribed on this machine and what it hears is pushed into the conversation.
+Claude writes down what was said and what was meant, and acts on what was
+addressed to it. Nothing is typed, nothing polls, and the microphone closes
+when the session does. Claude can answer out loud too, in a local voice that
+stops when you talk over it.
 
-Shadow mode is the default and safe validation setting. It never delivers
-historical or new `is_shadow=1` rows. Production delivery requires both:
-
-```sh
-DONNA_VOICE_QUEUE_MODE=deliver
-DONNA_CLAUDE_SESSION_ID=<the-session-owned-by-the-SDK-wrapper>
 ```
+you, out loud:   "Hey Claude, can you run the test suite again?"
 
-Start the bridge (or install the launchd template under `ops/`):
-
-```sh
-uv run --project stt-local python stt-local/delivery_worker.py \
-  --session "$DONNA_CLAUDE_SESSION_ID"
+⏺ Monitor event: [heard 22:41:07] Hey Claude, can you run the test suite again? · Microphone transcript (donna ears)
+⏺ Heard: you want the test suite run again. Running it now.
+⏺ Bash(uv run pytest -q) ...
+⏺ Bash(ears say "All hundred and eighty tests pass.")      <- in your headphones
 ```
-
-Only after that bridge is healthy should the legacy Stop hook be removed from
-Claude settings. Stock Claude Code cannot accept supported arbitrary mid-turn
-prompt injection; Donna therefore explicitly chooses SDK-wrapper ownership for
-the one-second target. A stock terminal remains a fallback without that SLA.
-
-Operations:
-
-```sh
-uv run --project stt-local python stt-local/voice_queue.py status
-uv run --project stt-local python stt-local/voice_queue.py health
-uv run --project stt-local python stt-local/voice_queue.py list --limit 20
-uv run --project stt-local python stt-local/voice_queue.py replay MESSAGE_ID
-uv run --project stt-local python stt-local/voice_queue.py prune --completed-older-than-days 30
-```
-
-Dead letters and pending rows are never pruned. Transcript text is hidden from
-inspection unless `--include-text` is explicitly requested. The production
-wake phrase is “Oh my god, Donna”. Point the typed-prompt cancellation hook at
-`python stt-local/playback_control.py cancel`. Kokoro registers the exact
-playback child with `register_playback()` and removes it in `finally` with
-`unregister_playback()`; a PID start token prevents terminating an unrelated
-reused PID. Queued prompts call the same controller before SDK submission.
-Full spoken barge-in still requires AEC because microphone frames are gated
-during TTS.
-
-## Historical implementation notes
-
-Built 2026-08-15. Lets you talk to Claude Code entirely by voice: no
-keyboard, no mouse, mic only. Uses the Deepgram CLI (`dg`) for both
-speech-to-text and text-to-speech.
-
-## Signal path
-
-One full cycle of the loop, mic to speaker. Copper stages are the local
-STT/TTS engine (Silero VAD + whisper.cpp + kokoro-local, see `PLAN.md`);
-slate stages are the wake-word gate, debounce, and Stop-hook wiring
-carried over unchanged from the original `dg listen`/`dg speak` build.
-
-```mermaid
-%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#2A2018','primaryTextColor':'#F2E8DC','primaryBorderColor':'#7A8B87','lineColor':'#8A7D6C','fontFamily':'ui-monospace, SFMono-Regular, Menlo, monospace','fontSize':'13px','edgeLabelBackground':'#171410'}}}%%
-flowchart TB
-    turnEnd["Claude turn ends"]
-    stopHook["Stop hook fires<br/>(Tink cue)"]
-    devicePick{"AirPods active<br/>output?"}
-    airpodsMic["AirPods Pro mic"]
-    fallbackMic["external speaker &rarr; Logitech BRIO &rarr; AirPods<br/>(priority fallback)"]
-    capture["continuous capture<br/>512-sample frames @ 16kHz"]
-    vad["Silero VAD<br/>streaming endpoint detection"]
-    flush["trailing silence<br/>&rarr; flush WAV clip"]
-    whisper["whisper.cpp<br/>ggml-base.en, Metal"]
-    wakeGate{"starts with<br/>wake phrase?"}
-    discard["discard line"]
-    debounce["debounce buffer<br/>up to 3s, stitches split lines"]
-    popCue["Pop cue &rarr; FIFO &rarr; exit 2"]
-    claudeTurn["Claude composes reply"]
-    kokoro["kokoro-local<br/>Kokoro-82M, local"]
-    playback["afplay &rarr; speaker / AirPods"]
-
-    turnEnd --> stopHook --> devicePick
-    devicePick -- yes --> airpodsMic
-    devicePick -- no --> fallbackMic
-    airpodsMic --> capture
-    fallbackMic --> capture
-    capture --> vad --> flush --> whisper --> wakeGate
-    wakeGate -- no --> discard -.-> capture
-    wakeGate -- yes --> debounce --> popCue --> claudeTurn --> kokoro --> playback -.-> turnEnd
-
-    classDef newc fill:#3A2415,stroke:#E08A3F,stroke-width:2px,color:#F5E6D3
-    classDef keptc fill:#1F2A28,stroke:#7A8B87,stroke-width:1.5px,color:#D7DEDB
-    classDef gate fill:#241A12,stroke:#E08A3F,stroke-width:1.5px,color:#F5E6D3,stroke-dasharray:2 2
-
-    class devicePick,airpodsMic,fallbackMic,capture,vad,flush,whisper,kokoro newc
-    class turnEnd,stopHook,discard,debounce,popCue,claudeTurn,playback keptc
-    class wakeGate gate
-```
-
-Dashed edges close the loop (not this utterance's path); solid edges are
-one utterance's journey through the pipeline.
 
 ## How it works
 
-1. `voice-listen.sh` runs `dg listen --mic` continuously.
-2. **Wake word gate**: a finalized transcript line is only acted on if it
-   starts with "Claude" (or "Cloud" — common STT mishearing of the name).
-   Everything else is silently ignored, so ambient talk / talking to someone
-   else in the room doesn't get treated as a command.
-3. **Debounce buffer** (3s, tunable via `DEBOUNCE` in the script): natural
-   pauses in speech can make Deepgram finalize a transcript mid-sentence,
-   splitting one thought into several lines. After a wake-word line starts a
-   command, the script waits up to `DEBOUNCE` seconds for more lines before
-   treating the utterance as complete, stitching split sentences back
-   together instead of firing on a fragment.
-4. Each visual notification (macOS notification via `notify.applescript`)
-   and finalized command line is echoed to stdout — one line per utterance.
-5. **Superseded design (kept for history):** originally run via the
-   `Monitor` tool, with Claude manually stopping/restarting it every turn.
-   Replaced with a `Stop` hook (`~/.claude/settings.json`, global — applies
-   to every Claude Code session) that runs
-   `~/.claude/scripts/voice-stop-hook.sh` via `asyncRewake`: it starts
-   `voice-listen.sh` in the background the instant Claude's turn ends
-   (doesn't block the turn from finishing), blocks on a FIFO until one
-   wake-word-gated command comes through, kills the listener, and exits
-   code 2 with the transcript — which wakes Claude back up with it as the
-   next turn (prefixed "Voice command captured: "). Claude still composes
-   the reply and speaks it manually — via the `kokoro-local` MCP tool
-   (`mcp__kokoro-local__speak`, registered user-scoped in `~/.claude.json`,
-   replacing `dg speak` + `afplay`) — only the listen/rewire step is
-   automated. `kokoro-local` runs as a persistent stdio MCP server so the
-   Kokoro-82M model loads once per Claude Code session instead of once per
-   call; `mcp_server.py` also explicitly requests the MPS (Metal) device,
-   since kokoro's own auto-detect only checks `torch.cuda.is_available()`
-   and silently falls back to CPU on Apple Silicon otherwise. Measured on
-   this machine: ~0.16s per call once warm (vs `dg speak`'s 6.83s
-   network+generation round-trip), after a one-time ~8-9s warm-up
-   (pipeline load + first-call Metal kernel compile) on the first `speak`
-   call of a session. Since the hook only starts listening
-   after Claude's whole turn (including the TTS playback) has finished,
-   the anti-feedback turn-taking behavior falls out for free.
-   Kill switch: `touch ~/.claude/scripts/.voice-hook-disabled` to turn it
-   off (checked at the top of the hook script, absent = enabled by
-   default); `rm` it to re-enable. No settings.json edit needed to toggle.
+```
+microphone ──▶ Silero VAD ──▶ whisper.cpp server ──▶ filter ──▶ batcher ──▶ stdout
+ sounddevice    cuts audio     large-v3-turbo on      drops       waits for    │
+ 16 kHz mono    into           Metal, loaded once     Whisper's   a pause      │
+                utterances     for the session        phantoms                 ▼
+                                             Claude Code plugin monitor: every burst of
+                                             lines becomes one notification that wakes
+                                             the model, idle or mid-task
+```
 
-Exiting a voice session: say "Oh my god, Donna, stop" (or "end voice mode") and have
-Claude just not act on it / respond without a follow-up question, so the
-hook's next cycle has nothing pending — or touch the disable flag above
-for a hard stop. There's no built-in infinite-loop cap on the hook itself
-(by design, per the user) — it fires again every time a Claude turn ends,
-globally, in every session, until the disable flag is set.
+It is one process, `ears listen`, declared as a **plugin monitor**. Claude Code
+starts it with the session, turns its stdout into notifications, and stops it
+when the session ends. There is no queue, no socket, no hook polling a buffer
+and no second Claude session: the harness does the delivery.
 
-## Known limitations (not solved in this build)
+A `SessionStart` hook tells the model what the `[heard ...]` lines are and how
+to treat them. A `SessionEnd` hook stops the listener, as a second line of
+defence behind the harness's own SIGTERM.
 
-- **No barge-in / interruption support.** Strict turn-taking only. The mic
-  listener is stopped while Claude's reply plays, both to avoid the
-  feedback-loop problem above and because real barge-in (cancel playback the
-  moment new speech starts) needs concurrent capture+playback with a cancel
-  signal — bigger build than fit in the time available.
-- **No true low-latency TTS streaming.** `dg speak` generates the full audio
-  file before playback starts; there's no `--stream` flag. `afplay` also
-  can't read from stdin (`-` is not a valid source for it — confirmed by
-  testing), so even piping wouldn't help. Real streaming would mean hitting
-  Deepgram's Aura TTS WebSocket API directly and playing through `ffplay`
-  instead of `afplay`.
-- **Debounce is a workaround, not a real fix.** The Deepgram CLI (`dg
-  listen`) doesn't expose Deepgram's actual endpointing / `utterance_end_ms`
-  parameters — checked `--help` and `--agent-friendly` output, neither
-  exposes them. If `dg` adds that later, prefer it over the debounce hack.
-- 3s debounce was picked empirically after 1.5s cut off mid-sentence during
-  testing. May need further tuning per person's speech pace/pause habits.
+### Speaking back
 
-## Files here
+`ears say "..."` is the other direction. The first call starts a voice server
+that keeps a [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) model warm on
+Metal: about five seconds to load, under a second from the call to the first
+sound after that. Replies are played in the order they were sent. It is a
+separate process with its own, heavier environment, so a session that never
+speaks never loads PyTorch.
 
-- `voice-listen.sh` lives only at `~/.claude/scripts/voice-listen.sh` (what
-  the Stop hook actually runs) — no project-local copy, after the two drifted
-  out of sync once already (wake phrase changed in canonical, not here)
-- `notify.applescript` — macOS notification helper, takes transcript text as
-  argv so it never has to be escaped into an AppleScript string literal
+Speaking and listening at once comes down to one question: can the microphone
+hear the reply?
 
-## Also fixed this session (separate from the voice loop, but same session)
+| Output | While a reply plays |
+| --- | --- |
+| Headphones (AirPods, a headset, the headphone jack) | The microphone stays open. Talk over the reply and it stops; what you said is delivered as usual. |
+| Loudspeakers, or a device that is not recognised | The listener ignores the microphone until the reply has ended, because voice detection cannot tell the reply from you. `ears voice stop` cuts it short. |
 
-`~/.codex/config.toml`'s `elevenlabs` MCP server entry was broken — Bitwarden
-CLI (`bw`) was fully logged out, and Codex spawns MCP servers with no
-inherited terminal session so it can never interactively unlock it. Fixed by
-pointing the entry at `~/.mcp/elevenlabs/launch.sh`, which reads a cached
-Bitwarden session token from `~/.mcp/elevenlabs/.bw_session` (never the
-master password) — see that script for the one-time manual `bw login` /
-`bw unlock --raw` setup it depends on.
+While it plays, the voice server keeps a small flag file (`run/speaking.json`:
+who is speaking, and whether through loudspeakers). The listener checks it for
+every audio frame, and signals the server when you start to talk.
 
-Mid-fix, a concurrent Codex session (same `~/.codex/config.toml`) briefly
-overwrote that block with a version that popped a fake "Codex" dialog asking
-for the Bitwarden master password via `osascript` — turned out to be a
-different Codex session working the same file, not a compromise, but worth
-remembering: don't type a vault master password into any dialog like that,
-regardless of source.
+### Why a plugin monitor
+
+The ways Claude Code 2.1.322 lets something outside the conversation start a
+turn. "Wakes idle" means a turn starts with nothing typed; "mid-task" means the
+message lands between two tool calls of a turn already running.
+
+| Mechanism | Wakes idle | Mid-task | Starts by itself | The catch |
+| --- | --- | --- | --- | --- |
+| **Plugin monitor** | yes | yes | yes, with the session | none found: this is what DONNA uses |
+| Monitor tool | yes | yes | no, the model must arm it | expires after 30 minutes at most, then needs re-arming |
+| `asyncRewake` hook | yes | not tested | no, one long-poll per message | must be re-armed after every delivery; a hook timeout applies |
+| Channel (MCP push) | yes | queued for the next turn | yes | research preview: a custom server needs `--dangerously-load-development-channels` on every launch |
+| `/loop`, cron | only while idle | no | no | a model turn per tick even in silence, a minute of latency at best |
+| MCP tool | no | no | no | a tool answers a call; it cannot start a turn |
+
+The plugin monitor row was tested in real sessions: a line printed by the
+monitor started the first turn of a session nobody had typed into, and a line
+printed while the model was running a chain of commands arrived between the
+third and fourth. The Monitor tool shares that delivery path. The other rows
+are from the Claude Code documentation and were not exercised here.
+
+So, to the question "can an MCP tool ping Claude every five seconds": a tool
+cannot, a channel can but is not ready for daily use, and a monitor does the
+same job with no flags.
+
+## Install
+
+Requirements: macOS on Apple silicon, [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
+and [uv](https://docs.astral.sh/uv/).
+
+```sh
+brew install whisper-cpp uv
+```
+
+Enable the plugin for this project only, loaded in place from this checkout:
+
+```sh
+claude plugin marketplace add /path/to/DONNA --scope local
+claude plugin install donna@donna --scope local
+```
+
+Use `--scope user` instead to have it in every project. To try it for one
+session without installing anything:
+
+```sh
+claude --plugin-dir /path/to/DONNA/plugin
+```
+
+Start a new session after installing: monitors are armed at session start.
+
+The first session downloads the speech model (1.6 GB) into `~/.donna/models`.
+macOS grants the microphone per terminal application, so the first run also
+asks for that. `ears doctor` checks all of it.
+
+Claude runs `ears` through its Bash tool. To keep spoken replies from waiting
+on a permission prompt, allow it once in your settings:
+`"permissions": {"allow": ["Bash(ears *)"]}`.
+
+Spoken replies cost nothing until they are used. The first `ears say` builds
+the voice environment (PyTorch and Kokoro, about 1 GB, cached by uv) and
+fetches the Kokoro model (310 MB) from Hugging Face. Replies fall back to the
+macOS built-in voice until that has finished, and whenever Kokoro cannot start.
+
+## Use
+
+Talk. A couple of seconds after you stop, what you said arrives in the
+conversation and Claude responds:
+
+- **Said to Claude** (a question, a request, a correction): handled like a typed message.
+- **Said near the microphone** (a call, a colleague): a short note of who said what
+  and what was decided. No interruption, no work started.
+- **Unintelligible**: one line saying so.
+
+Speech can direct Claude but cannot authorise it. Anything destructive, hard to
+undo or visible to other people still needs a typed go-ahead, because anyone
+near the microphone, or a video playing, can produce a transcript line.
+
+Say "talk back to me" or "answer out loud" and Claude also speaks its replies:
+the gist in a sentence or three, with code, paths and lists left on screen.
+"Text only" turns that off again. Set `speak` to have every session start
+with it on.
+
+| Command | Effect |
+| --- | --- |
+| `ears status` | what the listener is doing |
+| `ears pause` / `ears resume` | close and reopen the microphone |
+| `ears mode notes` | one digest a minute instead of a push at every pause (meetings, calls) |
+| `ears mode live` | back to conversation |
+| `ears voice on` / `ears voice off` | spoken replies for this session |
+| `ears say "..."` | speak; this is what Claude runs to answer out loud |
+| `ears voice stop` | cut off what is being said |
+| `ears tail -n 20` | the last utterances heard |
+| `ears since 15m` / `ears since 14:30` | everything heard since then |
+| `ears doctor` | check the installation; `--mic-test` records three seconds |
+
+`ears` is on Claude's PATH while the plugin is enabled, so asking "mute the mic"
+or "what did we just say about the deploy?" works too. `/donna:ears pause` is
+the same thing as a slash command.
+
+### Settings
+
+`~/.donna/config.json`, read when a session starts. Every key is optional, and
+`EARS_<KEY>` in the environment overrides the file.
+
+```json
+{
+  "ears": {
+    "device": "BRIO, MacBook",
+    "language": "auto",
+    "pause_s": 2.0
+  }
+}
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `device` | *(empty)* | Follow the macOS default input, including when it changes. Otherwise name fragments in order of preference |
+| `language` | `auto` | Whisper language code, or detect per utterance |
+| `model` | `large-v3-turbo` | A whisper.cpp model name, or a path to a ggml file |
+| `prompt` | *(empty)* | Vocabulary hint for Whisper (names, jargon) |
+| `mode` | `live` | Mode a session starts in |
+| `pause_s` | `2.0` | Live: silence that ends a batch |
+| `min_interval_s` | `3.0` | Live: least time between two pushes |
+| `max_wait_s` | `30.0` | Live: a monologue is delivered in chunks this long |
+| `busy_events`, `busy_interval_s` | `5`, `15.0` | Live: after this many pushes in a minute, space them this far apart |
+| `notes_interval_s` | `60.0` | Notes: length of one digest |
+| `vad_threshold`, `min_silence_ms`, `min_speech_ms`, `pre_roll_ms`, `max_utterance_s` | `0.5`, `700`, `250`, `300`, `28` | Voice activity detection |
+| `speak` | `false` | Start sessions with spoken replies on |
+| `voice` | `af_heart` | Kokoro voice. Its first letter is its language: `a` American and `b` British English, `p` Brazilian Portuguese, `e` Spanish, `f` French, `i` Italian. `ears say --voice pf_dora` picks one for a single reply |
+| `voice_speed` | `1.0` | Speaking rate |
+| `voice_engine` | `kokoro` | `say` uses the macOS built-in voice: nothing to download, less natural |
+| `say_voice` | *(empty)* | macOS voice for the `say` engine and for the fallback; empty is the system voice |
+| `voice_gate` | `auto` | Ignore the microphone while speaking: `auto` does unless the output is headphones, or force it `on` or `off` |
+| `voice_barge_in` | `true` | Talking over a reply stops it |
+| `voice_idle_s` | `1800` | The voice server exits after this long without a reply |
+
+Japanese and Chinese Kokoro voices need extra packages that are not installed.
+
+## Privacy
+
+- Audio is processed in memory and never written to disk or sent anywhere.
+  Whisper runs locally; its server listens on loopback only.
+- Transcript **text** is kept in `~/.donna/ears/sessions/<session>.jsonl`,
+  readable by you alone, and it becomes part of the conversation, which goes to
+  Anthropic like anything you type.
+- The log (`~/.donna/ears/ears.log`) records timings and counts, never words.
+- The microphone is open exactly as long as the listener process lives, and the
+  listener cannot outlive its session: it stops on SIGTERM, when the Claude Code
+  process disappears, when its output pipe closes, and five seconds after being
+  asked to stop no matter what.
+- One session holds the microphone at a time. A second session waits and takes
+  over when the first ends. Headless runs (`claude -p`) never listen.
+- Speech output is local as well. What is spoken is not logged. The voice
+  server listens on loopback only and serves only callers holding the token in
+  its state file, which you alone can read. It exits when the sessions that
+  used it are gone, and after half an hour without a reply.
+
+## Develop
+
+```sh
+uv run --with pytest pytest -q tests     # everything, about a minute
+uv run --with pytest pytest -q tests --deselect tests/test_pipeline.py   # unit tests only, seconds
+uvx ruff check plugin tests && uvx ruff format --check plugin tests
+```
+
+No test opens a microphone or makes a sound. The end-to-end tests synthesise
+speech with `say`, play it from a file through the real listener process, and
+check what comes out and how the process starts, shares the microphone,
+restarts and dies. The voice server is tested with stand-ins for Kokoro and
+for the loudspeaker. To do the same by hand:
+
+```sh
+say -o /tmp/hello.aiff "Hey Claude, what is the current git branch?"
+plugin/bin/ears listen --input-file /tmp/hello.aiff --exit-at-eof
+```
+
+`EARS_INPUT_FILE=/path/to.wav claude --plugin-dir plugin` runs a whole session
+against a recording instead of the microphone.
+
+```
+plugin/
+  .claude-plugin/plugin.json
+  monitors/monitors.json     the listener, as a monitor
+  hooks/hooks.json           SessionStart: protocol for the model. SessionEnd: stop
+  skills/ears/SKILL.md       /donna:ears
+  bin/ears                   launcher; restarts a crashed listener
+  lib/ears.py                entry point, with the dependency list uv installs
+  lib/speak.py               entry point of the voice server (Kokoro, PyTorch)
+  lib/donna_ears/
+    listen.py                lifetime, capture loop, delivery
+    voice.py                 `ears say`: client, speaking flag, macOS fallback
+    voice_server.py          warm Kokoro model, playback, interruption
+    segmenter.py             speech probability -> utterances
+    stt.py                   whisper-server process and client
+    textfilter.py            rejects Whisper's hallucinations
+    batcher.py               when to push
+    events.py                formatting and pacing within the harness's limits
+    audio.py                 microphone and file sources
+    cli.py, config.py        commands, settings, state files
+    lock.py                  one microphone holder, one voice server
+    protocol.md              what the model is told at session start
+tests/
+```
+
+Monitor limits the code is built around, read from Claude Code 2.1.322 and worth
+re-checking after an upgrade: lines written within 200 ms merge into one
+notification; a line is cut at 500 characters and a notification at 3000;
+notifications are metered at a burst of 10 and one per 2 s after that, and
+anything over is dropped; a plugin monitor is armed once per session and not
+restarted if it exits.
+
+## History
+
+Everything tried before this, a wake-phrase daemon with a Stop-hook buffer, a
+durable SQLite queue with leasing, an Agent SDK-owned session, a Kokoro MCP
+server, and the research notes that went with them, is on the `DEPRECATED`
+branch.

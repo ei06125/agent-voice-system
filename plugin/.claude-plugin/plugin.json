@@ -1,0 +1,9 @@
+{
+  "name": "donna",
+  "version": "0.3.0",
+  "description": "Ambient voice for Claude Code: the microphone is transcribed locally and what it hears is pushed into the session for as long as the session runs. Replies can be spoken back in a local Kokoro voice.",
+  "author": {
+    "name": "Pedro Oliveira"
+  },
+  "keywords": ["voice", "microphone", "speech-to-text", "text-to-speech", "whisper", "kokoro", "monitor"]
+}

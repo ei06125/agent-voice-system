@@ -1,6 +1,16 @@
-stt-local/.venv/
-stt-local/__pycache__/
-models/
+# Python
+.venv/
+__pycache__/
 *.pyc
-.DS_Store
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+wheels/
+
+# Local artefacts: speech models, recordings, scratch output
+models/
 outputs/
+
+.DS_Store

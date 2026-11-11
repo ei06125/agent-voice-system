@@ -1,0 +1,113 @@
+#!/bin/bash
+# donna ears launcher.
+#
+# `listen` and `doctor` need numpy, sounddevice and Silero VAD, so they run
+# under uv, which builds and caches that environment from the dependency list
+# at the top of lib/ears.py. Every other command is standard library only and
+# runs under a bare python3, so the session hooks return instantly.
+#
+# `listen` is also supervised here: if the listener crashes it is started
+# again, with a growing delay, for as long as the Claude Code session that owns
+# it is alive. Claude Code arms a plugin monitor once per session and never
+# restarts it, so a listener that simply died would leave the session deaf.
+
+set -u
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in /*) ;; *) SOURCE="$DIR/$SOURCE" ;; esac
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+SCRIPT="$ROOT/lib/ears.py"
+
+find_uv() {
+  command -v uv 2>/dev/null && return
+  for candidate in /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+    [ -x "$candidate" ] && { echo "$candidate"; return; }
+  done
+}
+
+find_python() {
+  command -v python3 2>/dev/null && return
+  for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+    [ -x "$candidate" ] && { echo "$candidate"; return; }
+  done
+}
+
+command_name="${1:-}"
+
+case "$command_name" in
+  listen)
+    UV="$(find_uv)"
+    if [ -z "$UV" ]; then
+      # stdout is the event stream: this line reaches the model.
+      echo "[ears error] uv is not installed, so the listener cannot start. Install it (brew install uv) and restart the session."
+      exit 75
+    fi
+    owner="${CLAUDE_PID:-$PPID}"
+    child=""
+    stopping=0
+    forward() {
+      stopping=1
+      [ -n "$child" ] && kill -TERM "$child" 2>/dev/null
+    }
+    trap forward TERM INT HUP
+
+    delay=2
+    quick_failures=0
+    while :; do
+      started=$(date +%s)
+      "$UV" run --quiet --script "$SCRIPT" "$@" &
+      child=$!
+      wait "$child"
+      status=$?
+      # A trapped signal interrupts `wait`; collect the child before deciding.
+      while kill -0 "$child" 2>/dev/null; do wait "$child"; status=$?; done
+      child=""
+
+      [ "$stopping" -eq 1 ] && exit 0
+      # 0: clean stop. 75: a problem only the user can fix, already reported.
+      case "$status" in 0 | 75) exit "$status" ;; esac
+      kill -0 "$owner" 2>/dev/null || exit 0
+
+      if [ $(($(date +%s) - started)) -lt 20 ]; then
+        quick_failures=$((quick_failures + 1))
+      else
+        quick_failures=0
+        delay=2
+      fi
+      if [ "$quick_failures" -ge 5 ]; then
+        echo "[ears error] the listener keeps crashing on start (exit $status) and has given up. Details: ${DONNA_HOME:-$HOME/.donna}/ears/ears.log"
+        exit 75
+      fi
+      sleep "$delay" &
+      wait $!
+      [ "$stopping" -eq 1 ] && exit 0
+      [ "$delay" -lt 30 ] && delay=$((delay * 2))
+    done
+    ;;
+
+  doctor)
+    UV="$(find_uv)"
+    if [ -z "$UV" ]; then
+      echo "ears: uv is not installed (brew install uv)" >&2
+      exit 1
+    fi
+    exec "$UV" run --quiet --script "$SCRIPT" "$@"
+    ;;
+
+  *)
+    PY="$(find_python)"
+    if [ -n "$PY" ]; then
+      exec "$PY" "$SCRIPT" "$@"
+    fi
+    UV="$(find_uv)"
+    if [ -n "$UV" ]; then
+      exec "$UV" run --quiet --script "$SCRIPT" "$@"
+    fi
+    echo "ears: neither python3 nor uv was found" >&2
+    exit 1
+    ;;
+esac

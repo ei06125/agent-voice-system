@@ -1,0 +1,16 @@
+{
+  "name": "donna",
+  "owner": {
+    "name": "Pedro Oliveira"
+  },
+  "metadata": {
+    "description": "donna: ambient voice for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "donna",
+      "source": "./plugin",
+      "description": "Live microphone transcripts pushed into the Claude Code session while it runs, and replies spoken back."
+    }
+  ]
+}

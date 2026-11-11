@@ -1,0 +1,7 @@
+[
+  {
+    "name": "ears",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/ears listen",
+    "description": "Microphone transcript (donna ears)"
+  }
+]

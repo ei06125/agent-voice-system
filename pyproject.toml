@@ -1,0 +1,32 @@
+[project]
+name = "donna"
+version = "0.3.0"
+description = "Ambient voice for Claude Code: live microphone transcripts pushed into the session"
+readme = "README.md"
+requires-python = ">=3.11"
+# Keep in step with the inline dependency list at the top of plugin/lib/ears.py,
+# which is what the listener actually runs with (tests/test_plugin_layout.py checks).
+dependencies = [
+    "numpy>=1.26",
+    "onnxruntime>=1.18",
+    "silero-vad-notorch>=6.2",
+    "sounddevice>=0.5",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["plugin/lib"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["plugin/lib", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
