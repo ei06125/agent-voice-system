@@ -28,6 +28,7 @@ class Utterance:
     ended_at: float
     language: str = ""  # ISO code, empty when unknown
     added_at: float = 0.0  # batcher clock when it arrived
+    unverified: bool = False  # owner-only mode: too short to tell, delivered marked "?"
 
 
 class Batcher:

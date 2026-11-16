@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 
-from . import audio, config, events, stt, textfilter, voice
+from . import audio, config, events, owner, ownercheck, stt, textfilter, voice
 from .batcher import Batcher, Utterance
 from .lock import FileLock
 from .segmenter import FRAME_SAMPLES, SAMPLE_RATE, Segmenter
@@ -81,13 +81,17 @@ class TranscriptLog:
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in session_id)
         self.path = config.sessions_dir() / f"{safe or 'session'}.jsonl"
 
-    def append(self, utterance: Utterance) -> None:
+    def append(self, utterance: Utterance, speaker: dict | None = None) -> None:
         record = {
             "t0": round(utterance.started_at, 2),
             "t1": round(utterance.ended_at, 2),
             "lang": utterance.language,
             "text": utterance.text,
         }
+        if speaker is not None:
+            # Whose voice it was, for shadow-mode review and calibration. The
+            # file is private to the user, like the words themselves.
+            record["speaker"] = speaker
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -121,6 +125,14 @@ class Listener:
         self.dropped_segments = 0
         self.barge_ins = 0
         self.last_voice_wall = 0.0
+        # Owned by the capture thread; stamped onto each segment (_stamp), so
+        # the transcription worker never reads them.
+        self._device = ""
+        self._epoch = 0
+        self._speaker_mode = str(cfg["speaker"])
+        # Used only by the transcription worker; loads its model lazily there.
+        self.owner = ownercheck.OwnerCheck(cfg, log, self.error_once)
+        self.speaker_dropped = 0
 
     # ------------------------------------------------------------------ state
 
@@ -144,6 +156,8 @@ class Listener:
                 pushed=self.pushed,
                 pending=len(self.batcher),
                 dropped_segments=self.dropped_segments,
+                speaker_mode=self._speaker_mode,
+                speaker=dict(self.owner.counts, dropped=self.speaker_dropped),
                 last_voice_at=self.last_voice_wall,
                 whisper_pid=self.server.pid if self.server else 0,
             )
@@ -281,6 +295,7 @@ class Listener:
                 paused=False,
                 mode=str(self.cfg["mode"]),
                 speak=bool(self.cfg["speak"]),
+                speaker=str(self.cfg["speaker"]),
                 session=self.session_id,
             )
         self.write_state("starting")
@@ -353,6 +368,7 @@ class Listener:
         gated = False
         voiced_run = 0
         barged = False
+        replying = False
 
         while not self._stopping():
             now = time.monotonic()
@@ -360,10 +376,7 @@ class Listener:
             if now >= next_control:
                 next_control = now + 0.3
                 control = config.read_control()
-                if control["mode"] and control["mode"] != self.batcher.mode:
-                    self.log.info("mode -> %s", control["mode"])
-                    self.batcher.mode = control["mode"]
-                    self.write_state()
+                self._apply_control(control)
                 if control["paused"] != paused:
                     paused = control["paused"]
                     self.log.info("paused -> %s", paused)
@@ -402,6 +415,8 @@ class Listener:
                     continue
                 failures = 0
                 opened = True
+                self._device = source.name
+                self._epoch += 1
                 segmenter.reset()
                 self.vad.reset_states()
                 last_frame = time.monotonic()
@@ -441,6 +456,10 @@ class Listener:
                     silent_since = None
 
             reply = speaking.get()
+            if bool(reply) != replying:
+                # Speech either side of a reply is not one conversation turn.
+                replying = bool(reply)
+                self._epoch += 1
             if reply and reply.get("gate"):
                 gate_until = now + GATE_HANGOVER_S
             if now < gate_until:
@@ -500,9 +519,29 @@ class Listener:
 
     # ------------------------------------------------------------ transcription
 
+    def _apply_control(self, control: dict) -> None:
+        """Runtime switches the capture thread applies (pause is handled there)."""
+        changed = False
+        if control["mode"] and control["mode"] != self.batcher.mode:
+            self.log.info("mode -> %s", control["mode"])
+            self.batcher.mode = control["mode"]
+            changed = True
+        if control.get("speaker") and control["speaker"] != self._speaker_mode:
+            self.log.info("speaker -> %s", control["speaker"])
+            self._speaker_mode = control["speaker"]
+            changed = True
+        if changed:
+            self.write_state()
+
+    def _stamp(self, segment) -> None:
+        segment.device = self._device
+        segment.epoch = self._epoch
+        segment.speaker_mode = self._speaker_mode
+
     def _submit(self, segment) -> None:
         if segment is None:
             return
+        self._stamp(segment)
         try:
             self._stt_queue.put_nowait(segment)
         except queue.Full:
@@ -526,7 +565,6 @@ class Listener:
             return "", ""
 
     def _stt_worker(self) -> None:
-        import numpy as np
 
         try:
             started = time.monotonic()
@@ -537,32 +575,52 @@ class Listener:
         while True:
             segment = self._stt_queue.get()
             try:
-                started = time.monotonic()
-                raw, language = self._transcribe(np.concatenate(segment.frames))
-                text = textfilter.accept(raw) if raw else None
-                self.log.info(
-                    "utterance %.1fs (voiced %.1fs) transcribed in %.1fs: %s",
-                    segment.duration,
-                    segment.voiced_seconds,
-                    time.monotonic() - started,
-                    f"{len(text)} chars [{language}]" if text else "rejected",
-                )
-                if text:
-                    utterance = Utterance(
-                        text=text,
-                        started_at=segment.started_at,
-                        ended_at=segment.ended_at,
-                        language=language,
-                    )
-                    self.transcript.append(utterance)
-                    self.batcher.add(utterance)
-                    self.utterances += 1
-                else:
-                    self.rejected += 1
+                self._handle(segment)
             except Exception:  # noqa: BLE001 - one bad clip must not end the session
                 self.log.exception("transcription worker error")
             finally:
                 self._stt_queue.task_done()
+
+    def _handle(self, segment) -> None:
+        """One segment: whose voice (if checked), then words, then delivery."""
+        import numpy as np
+
+        samples = np.concatenate(segment.frames)
+        check = self.owner.assess(segment, samples)
+        if check is not None and check.route == owner.DROP:
+            # Not the owner: never transcribed, so the words never exist.
+            self.speaker_dropped += 1
+            self.log.info(
+                "segment %.1fs (voiced %.1fs) dropped: %s (%s)",
+                segment.duration,
+                segment.voiced_seconds,
+                check.decision.kind,
+                check.decision.reason,
+            )
+            return
+        started = time.monotonic()
+        raw, language = self._transcribe(samples)
+        text = textfilter.accept(raw) if raw else None
+        self.log.info(
+            "utterance %.1fs (voiced %.1fs) transcribed in %.1fs: %s",
+            segment.duration,
+            segment.voiced_seconds,
+            time.monotonic() - started,
+            f"{len(text)} chars [{language}]" if text else "rejected",
+        )
+        if not text:
+            self.rejected += 1
+            return
+        utterance = Utterance(
+            text=text,
+            started_at=segment.started_at,
+            ended_at=segment.ended_at,
+            language=language,
+            unverified=check is not None and check.route == owner.UNVERIFIED,
+        )
+        self.transcript.append(utterance, check.record() if check else None)
+        self.batcher.add(utterance)
+        self.utterances += 1
 
     # ---------------------------------------------------------------- delivery
 

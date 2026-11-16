@@ -21,6 +21,11 @@ class Segment:
     started_at: float  # wall-clock time of the first frame
     ended_at: float  # wall-clock time just after the last frame
     voiced_seconds: float  # how much of it the detector called speech
+    # Stamped by the listener's capture thread when the segment is queued, so
+    # the transcription worker never reads capture state.
+    device: str = ""  # the input device it was heard on
+    epoch: int = 0  # bumped whenever capture restarts, a reply starts or stops
+    speaker_mode: str = "off"  # the speaker check in force when it was heard
 
     @property
     def duration(self) -> float:

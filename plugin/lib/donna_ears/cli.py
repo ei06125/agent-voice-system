@@ -117,6 +117,15 @@ def _describe(listener: dict) -> str:
             session=str(listener.get("session_id", "?"))[:8],
         ),
     ]
+    speaker_mode = listener.get("speaker_mode")
+    if speaker_mode and speaker_mode != "off":
+        counts = listener.get("speaker") or {}
+        tally = ", ".join(
+            f"{key} {counts[key]}"
+            for key in ("owner", "unknown", "other", "inactive", "dropped")
+            if counts.get(key)
+        )
+        lines.append(f"      speaker check: {speaker_mode}" + (f" ({tally})" if tally else ""))
     return "\n".join(lines)
 
 
@@ -207,6 +216,33 @@ def cmd_mode(args) -> int:
         print("ears: live mode - speech is pushed at each natural pause.")
     if not active:
         print("      (no active listener right now; a new session starts in its configured mode)")
+    return 0
+
+
+SPEAKER_HELP = {
+    "off": "off - every voice is delivered, nothing is checked.",
+    "shadow": "shadow - every segment is checked against your voiceprint and the verdict "
+    "recorded in the transcript; every voice is still delivered.",
+    "owner": "owner - only your voice is delivered; a short reply right after you "
+    "is delivered marked [heard ... ?]; other voices are not transcribed.",
+}
+
+
+def cmd_speaker(args) -> int:
+    active = _active(config.listeners())
+    if not args.speaker:
+        current = (
+            (active or {}).get("speaker_mode")
+            or config.read_control()["speaker"]
+            or config.load()["speaker"]
+        )
+        print(f"ears: speaker check is {SPEAKER_HELP[current]}")
+        print("      " + _voiceprint_line())
+        return 0
+    config.write_control(speaker=args.speaker)
+    print(f"ears: speaker check {SPEAKER_HELP[args.speaker]}")
+    if not active:
+        print("      (no active listener right now; a new session starts with the configured one)")
     return 0
 
 
@@ -653,6 +689,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("voice", help="spoken replies: on, off, stop (what is being said)")
     p.add_argument("action", nargs="?", choices=("on", "off", "stop", "status"), default="status")
     p.set_defaults(func=cmd_voice)
+
+    p = sub.add_parser("speaker", help="whose voice is delivered: off, shadow, owner")
+    p.add_argument("speaker", nargs="?", choices=config.SPEAKER_MODES)
+    p.set_defaults(func=cmd_speaker)
 
     p = sub.add_parser("enroll", help="make your voiceprint for one microphone from recordings")
     p.add_argument("files", nargs="*", help="recordings of your own speech (any audio format)")

@@ -54,10 +54,18 @@ DEFAULTS: dict[str, object] = {
     "voice_gate": "auto",  # auto | on | off
     "voice_barge_in": True,  # stop speaking when the user starts to talk
     "voice_idle_s": 1800.0,  # the voice server exits after this long unused
+    # --- owner-only listening (ears enroll, ears speaker) ---
+    "speaker": "off",  # off | shadow (check, record, deliver all) | owner (deliver the owner)
+    "speaker_min_s": 1.0,  # less voiced speech than this is never "owner" on its own
+    "speaker_follow_s": 5.0,  # a short reply this soon after the owner is delivered as "?"
+    "speaker_max_s": 8.0,  # embed at most this much of a segment (time before Whisper)
+    "speaker_threads": 1,
+    "speaker_device": "",  # check every input against this enrolled device's voiceprint
 }
 
 # Only these may be changed at runtime through control.json.
 MODES = ("live", "notes")
+SPEAKER_MODES = ("off", "shadow", "owner")
 
 
 def home() -> Path:
@@ -153,6 +161,8 @@ def load() -> dict[str, object]:
                 pass
     if cfg["mode"] not in MODES:
         cfg["mode"] = DEFAULTS["mode"]
+    if cfg["speaker"] not in SPEAKER_MODES:
+        cfg["speaker"] = DEFAULTS["speaker"]
     return cfg
 
 
@@ -181,7 +191,7 @@ def read_json(path: Path) -> dict:
 
 
 def read_control() -> dict:
-    """Runtime switches: ``{"paused": bool, "mode": "live"|"notes", "speak": bool|None}``.
+    """Runtime switches: paused, mode (live|notes), speak, speaker (off|shadow|owner).
 
     ``speak`` is None until something has set it, so a caller can fall back to
     the configured default.
@@ -189,10 +199,12 @@ def read_control() -> dict:
     data = read_json(control_path())
     mode = data.get("mode")
     speak = data.get("speak")
+    speaker = data.get("speaker")
     return {
         "paused": bool(data.get("paused", False)),
         "mode": mode if mode in MODES else None,
         "speak": speak if isinstance(speak, bool) else None,
+        "speaker": speaker if speaker in SPEAKER_MODES else None,
     }
 
 

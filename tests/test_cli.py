@@ -87,7 +87,7 @@ def test_status_json_is_machine_readable(capsys, no_claude):
     _, out = run(capsys, "status", "--json")
     data = json.loads(out)
     assert data["listeners"][0]["device"] == "Desk Mic"
-    assert data["control"] == {"paused": False, "mode": None, "speak": None}
+    assert data["control"] == {"paused": False, "mode": None, "speak": None, "speaker": None}
 
 
 # ---------------------------------------------------------- pause and mode
@@ -353,3 +353,22 @@ def test_status_reports_the_voiceprint_without_revealing_it(capsys, no_claude):
 def test_enroll_goes_through_uv_like_the_listener():
     launcher = LAUNCHER.read_text()
     assert "doctor | enroll)" in launcher
+
+
+def test_status_shows_the_speaker_check_when_it_is_on(capsys, monkeypatch):
+    monkeypatch.setenv("CLAUDE_PID", "0")
+    fake_listener(
+        os.getpid(),
+        speaker_mode="shadow",
+        speaker={"owner": 5, "other": 2, "dropped": 0},
+    )
+    _, out = run(capsys, "status")
+    assert "speaker check: shadow (owner 5, other 2)" in out
+
+
+def test_ears_speaker_switches_the_mode_at_runtime(capsys, no_claude):
+    code, out = run(capsys, "speaker", "shadow")
+    assert code == 0 and "shadow" in out
+    assert config.read_control()["speaker"] == "shadow"
+    _, out = run(capsys, "speaker")
+    assert "speaker check is shadow" in out
