@@ -82,6 +82,7 @@ def enroll(
 
     report = Report(device=device, model=model_name)
     vectors = []
+    hashes = []
     for name in files:
         label = Path(name).name
         try:
@@ -100,6 +101,7 @@ def enroll(
             continue
         report.used.append(label)
         report.seconds += len(samples) / audio.SAMPLE_RATE
+        hashes.append(speaker_models.sha256_of(Path(name)))
     if not vectors:
         raise EnrollError("no clip had usable speech; nothing was enrolled")
 
@@ -108,7 +110,7 @@ def enroll(
         (label, speaker.score(vector, centre))
         for label, vector in zip(report.used, vectors, strict=True)
     ]
-    profile.enroll(device, vectors, seconds=report.seconds)
+    profile.enroll(device, vectors, seconds=report.seconds, clip_hashes=hashes)
     voiceprint.save(profile)
     return report
 
@@ -136,8 +138,13 @@ def describe(report: Report) -> list[str]:
     return lines
 
 
-# The lengths of speech the listener actually judges, plus each whole clip.
-CALIBRATION_WINDOWS_S = (1.0, 2.0, 4.0, 0.0)
+# The lengths of speech the listener actually judges, plus each whole clip
+# (capped at speaker_max_s, as the listener caps it). 0.5 s windows are
+# scored for the report only: shorter than speaker_min_s, never "owner".
+CALIBRATION_WINDOWS_S = (0.5, 1.0, 2.0, 4.0, 0.0)
+SHORT_S = 0.5
+LONG_S = (2.0, 4.0, 0.0)
+MAX_RECORDING_S = 120.0  # read at most this much of each recording
 
 
 @dataclass
@@ -146,21 +153,26 @@ class Calibration:
     proposal: object  # calibrate.Proposal
     by_length: list[tuple[str, int, float, int, float]]  # label, n owner, median, n other, max
     saved: bool
+    problems: list[str] = field(default_factory=list)
+    refused: bool = False  # --write asked for, not done because of `problems`
 
 
-def _trials(embedder, files: list[str], min_s: float) -> dict[float, list[float]]:
-    """Embeddings of every window of every clip, keyed by window length."""
+def _trials(embedder, files: list[str], max_s: float) -> dict[float, list]:
+    """Embeddings of every window of every recording, keyed by window length."""
     from . import calibrate
 
     vectors: dict[float, list] = {length: [] for length in CALIBRATION_WINDOWS_S}
     for name in files:
         try:
-            samples = audio.decode_file(name)
+            samples = audio.decode_file(name)[: int(MAX_RECORDING_S * audio.SAMPLE_RATE)]
         except audio.SourceError as exc:
             raise EnrollError(str(exc)) from None
         for length in CALIBRATION_WINDOWS_S:
-            for piece in calibrate.windows(samples, length):
-                if len(piece) < min_s * audio.SAMPLE_RATE or _problem(piece):
+            pieces = calibrate.windows(samples, length)
+            if length == 0.0:
+                pieces = [samples[: int(max_s * audio.SAMPLE_RATE)]]
+            for piece in pieces:
+                if len(piece) < SHORT_S * audio.SAMPLE_RATE or _problem_window(piece):
                     continue
                 try:
                     vectors[length].append(embedder.embed(piece))
@@ -169,8 +181,24 @@ def _trials(embedder, files: list[str], min_s: float) -> dict[float, list[float]
     return vectors
 
 
+def _problem_window(samples) -> str | None:
+    """Like _problem, without the minimum length: windows are cut to size."""
+    import numpy as np
+
+    if float(np.sqrt(np.mean(np.square(samples)))) < SILENT_RMS:
+        return "silent"
+    if float(np.mean(np.abs(samples) >= 0.999)) > CLIPPED_FRACTION:
+        return "clipped"
+    return None
+
+
 def calibrate_device(
-    device: str, owner_files: list[str], other_files: list[str], write: bool, min_s: float = 1.0
+    device: str,
+    owner_files: list[str],
+    other_files: list[str],
+    write: bool,
+    max_s: float = 8.0,
+    force: bool = False,
 ) -> Calibration:
     """Score held-out owner clips and other voices against `device`'s voiceprint."""
     from . import calibrate
@@ -186,6 +214,13 @@ def calibrate_device(
         model_path = speaker_models.ensure(profile.model.name)
     except speaker_models.ModelError as exc:
         raise EnrollError(str(exc)) from None
+    enrolled = set(entry.clip_hashes)
+    reused = [Path(n).name for n in owner_files if speaker_models.sha256_of(Path(n)) in enrolled]
+    if reused:
+        raise EnrollError(
+            f"{', '.join(reused)} were used for enrollment; calibrate with held-out "
+            "recordings of your speech"
+        )
     embedder = make_embedder(model_path)
     try:
         profile.check(
@@ -194,17 +229,25 @@ def calibrate_device(
     except voiceprint.ProfileError as exc:
         raise EnrollError(str(exc)) from None
 
-    mine = _trials(embedder, owner_files, min_s)
-    theirs = _trials(embedder, other_files, min_s)
+    mine = _trials(embedder, owner_files, max_s)
+    theirs = _trials(embedder, other_files, max_s)
     owner_scores = {k: [speaker.score(v, entry.centroid) for v in vs] for k, vs in mine.items()}
     other_scores = {k: [speaker.score(v, entry.centroid) for v in vs] for k, vs in theirs.items()}
+
+    def pooled(scores):
+        return [s for length, values in scores.items() if length != SHORT_S for s in values]
+
     try:
         proposal = calibrate.propose(
-            [s for scores in owner_scores.values() for s in scores],
-            [s for scores in other_scores.values() for s in scores],
+            pooled(owner_scores),
+            pooled(other_scores),
+            other_recordings=len(other_files),
+            others_short=other_scores[SHORT_S],
         )
     except ValueError as exc:
         raise EnrollError(str(exc)) from None
+    owner_long = [s for length in LONG_S for s in owner_scores[length]]
+    problems = calibrate.problems(proposal, owner_long)
 
     by_length = []
     for length in CALIBRATION_WINDOWS_S:
@@ -218,10 +261,13 @@ def calibrate_device(
                 max(others) if others else float("nan"),
             )
         )
-    if write:
+    save = write and (force or not problems)
+    if save:
         profile.calibrate(device, accept=proposal.accept, reject=proposal.reject)
         voiceprint.save(profile)
-    return Calibration(device, proposal, by_length, saved=write)
+    return Calibration(
+        device, proposal, by_length, saved=save, problems=problems, refused=write and not save
+    )
 
 
 def describe_calibration(result: Calibration) -> list[str]:
@@ -237,16 +283,24 @@ def describe_calibration(result: Calibration) -> list[str]:
     lines += [
         f"  proposed: accept at {p.accept:.2f} or above, reject below {p.reject:.2f}",
         f"  with these: {p.owner_rejected:.0%} of your trials rejected, "
-        f"{p.owner_unknown:.0%} unknown; false accepts in this data 0, "
-        f"95% bound {p.false_accept_bound:.1%}",
+        f"{p.owner_unknown:.0%} unknown",
+        f"  false accepts in this data: none; with {p.other_trials} windows from "
+        "these recordings, the 95% bound per recording is "
+        f"{p.false_accept_bound:.0%} (more, and more varied, recordings lower it)",
+        f"  short other-voice windows (0.5 s) at or above reject: {p.short_leak:.0%} "
+        "(could pass as an unverified reply right after you)",
     ]
     if p.overlap:
         lines.append(
             "  warning: some other voices scored as high as yours; more or cleaner "
             "enrollment speech may help"
         )
+    for problem in result.problems:
+        lines.append(f"  problem: {problem}")
     if result.saved:
         lines.append(f"  saved: owner-only listening now filters {result.device!r}")
+    elif result.refused:
+        lines.append("  not saved because of the problem above (--force saves anyway)")
     else:
         lines.append("  not saved (dry run): add --write to use these thresholds")
     return lines

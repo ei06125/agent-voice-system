@@ -25,3 +25,12 @@ Feature: Calibrating a microphone
   Scenario: A microphone that was never enrolled cannot be calibrated
     When the owner calibrates "Logitech BRIO" from 6 clips of their speech and 6 clips of other voices, saving
     Then the command fails and says to enroll first
+
+  Scenario: Thresholds that would shut the owner out are not saved
+    When the owner calibrates "AirPods" from 6 clips of their speech and 6 clips of other voices including their own voice, saving
+    Then the command fails and says why the thresholds are unsafe
+    And "AirPods" is not calibrated
+
+  Scenario: The clips used for enrollment cannot double as held-out speech
+    When the owner calibrates "AirPods" using the enrollment clips as their held-out speech
+    Then the command fails and says the clips were used for enrollment

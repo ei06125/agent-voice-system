@@ -48,6 +48,9 @@ class DeviceProfile:
     enrolled_at: float
     accept: float | None = None
     reject: float | None = None
+    # sha256 of each enrollment recording, so calibration can insist on
+    # held-out speech. File hashes only; nothing about the voice.
+    clip_hashes: list[str] = field(default_factory=list)
 
     @property
     def calibrated(self) -> bool:
@@ -75,7 +78,12 @@ class Profile:
         return self.devices.get(name)
 
     def enroll(
-        self, device: str, embeddings: list, seconds: float, now: float | None = None
+        self,
+        device: str,
+        embeddings: list,
+        seconds: float,
+        now: float | None = None,
+        clip_hashes: list[str] | tuple = (),
     ) -> DeviceProfile:
         """Replace `device`'s voiceprint with the centroid of `embeddings`."""
         vectors = [[float(v) for v in vector] for vector in embeddings]
@@ -90,6 +98,7 @@ class Profile:
             clips=len(vectors),
             seconds=round(float(seconds), 2),
             enrolled_at=time.time() if now is None else now,
+            clip_hashes=list(clip_hashes),
         )
         self.devices[device] = entry
         return entry

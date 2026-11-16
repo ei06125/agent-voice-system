@@ -46,7 +46,7 @@ def write_wav(path, samples):
 
 def speech_clips(world, count, start=0):
     return [
-        write_wav(world["dir"] / f"speech-{start + i}.wav", signal("vowel", 3.0 + i))
+        write_wav(world["dir"] / f"speech-{start + i}.wav", signal("vowel", 3.0 + i + start / 1000))
         for i in range(count)
     ]
 

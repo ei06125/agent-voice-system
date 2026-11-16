@@ -20,7 +20,8 @@ def other_clips(cli_world, count):
 
 @given(parsers.parse('the owner has enrolled "{device}"'))
 def enrolled(cli_world, device):
-    run(cli_world, "enroll", "--device", device, *speech_clips(cli_world, 3, start=100))
+    cli_world["enrollment"] = speech_clips(cli_world, 3, start=100)
+    run(cli_world, "enroll", "--device", device, *cli_world["enrollment"])
     assert cli_world["code"] == 0
 
 
@@ -69,3 +70,37 @@ def fails_trials(cli_world):
 @then("the command fails and says to enroll first")
 def fails_enroll(cli_world):
     assert cli_world["code"] != 0 and "enroll" in cli_world["out"]
+
+
+@when(
+    parsers.re(
+        r'the owner calibrates "(?P<device>[^"]+)" from (?P<mine>\d+) clips of their speech '
+        r"and (?P<theirs>\d+) clips of other voices including their own voice, saving"
+    )
+)
+def calibrates_contaminated(cli_world, device, mine, theirs):
+    others = other_clips(cli_world, int(theirs) - 1) + speech_clips(cli_world, 1, start=300)
+    argv = ["calibrate", "--device", device, "--write"]
+    argv += ["--owner", *speech_clips(cli_world, int(mine), start=200), "--others", *others]
+    run(cli_world, *argv)
+
+
+@when(
+    parsers.parse(
+        'the owner calibrates "{device}" using the enrollment clips as their held-out speech'
+    )
+)
+def calibrates_with_enrollment_clips(cli_world, device):
+    argv = ["calibrate", "--device", device, "--owner", *cli_world["enrollment"]]
+    run(cli_world, *argv, "--others", *other_clips(cli_world, 6))
+
+
+@then("the command fails and says why the thresholds are unsafe")
+def fails_unsafe(cli_world):
+    assert cli_world["code"] != 0
+    assert "not saved" in cli_world["out"] and "--force" in cli_world["out"]
+
+
+@then("the command fails and says the clips were used for enrollment")
+def fails_enrollment_clips(cli_world):
+    assert cli_world["code"] != 0 and "enrollment" in cli_world["out"]

@@ -56,3 +56,33 @@ def test_windows_cut_a_clip_into_non_overlapping_pieces():
     pieces = calibrate.windows(samples, seconds=2.0)
     assert [len(p) for p in pieces] == [32000, 32000]
     assert calibrate.windows(samples, seconds=0) == [samples]
+
+
+def test_a_proposal_that_would_shut_the_owner_out_is_flagged():
+    owner = [0.5 + 0.01 * i for i in range(30)]  # 0.50 .. 0.79
+    others = [0.1] * 29 + [0.7]  # one contaminated clip: the owner audible in it
+    proposal = calibrate.propose(owner, others)
+    assert proposal.overlap is True
+    (problem,) = calibrate.problems(proposal, owner_long=owner)
+    assert "of your speech" in problem
+
+
+def test_a_clean_proposal_has_no_problems():
+    owner = [0.62 + 0.01 * i for i in range(30)]
+    others = [0.05 + 0.01 * i for i in range(30)]
+    proposal = calibrate.propose(owner, others)
+    assert calibrate.problems(proposal, owner_long=owner) == []
+
+
+def test_the_false_accept_bound_counts_distinct_recordings_not_windows():
+    owner = [0.8] * 40
+    others = [0.1] * 300  # 300 windows, but cut from 10 recordings
+    proposal = calibrate.propose(owner, others, other_recordings=10)
+    assert proposal.false_accept_bound == pytest.approx(0.3)
+
+
+def test_the_share_of_other_voices_that_could_slip_through_as_unverified_is_reported():
+    owner = [0.62 + 0.01 * i for i in range(30)]
+    others = [0.05 + 0.01 * i for i in range(30)]  # reject lands at 0.31
+    proposal = calibrate.propose(owner, others, others_short=[0.05] * 8 + [0.65] * 2)
+    assert proposal.short_leak == pytest.approx(0.2)

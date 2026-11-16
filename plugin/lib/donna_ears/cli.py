@@ -644,14 +644,15 @@ def cmd_calibrate(args) -> int:
             args.owner,
             args.others,
             write=args.write,
-            min_s=float(config.load()["speaker_min_s"]),
+            max_s=float(config.load()["speaker_max_s"]),
+            force=args.force,
         )
     except enroll.EnrollError as exc:
         print(f"ears: {exc}")
         return 1
     for line in enroll.describe_calibration(result):
         print(line)
-    return 0
+    return 1 if result.refused else 0
 
 
 def cmd_listen(args) -> int:
@@ -731,6 +732,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--owner", nargs="+", required=True, help="held-out recordings of you")
     p.add_argument("--others", nargs="+", required=True, help="recordings of other voices")
     p.add_argument("--write", action="store_true", help="save the proposed thresholds")
+    p.add_argument("--force", action="store_true", help="with --write: save despite problems")
     p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("listen", help="run the listener (Claude Code starts this as a monitor)")

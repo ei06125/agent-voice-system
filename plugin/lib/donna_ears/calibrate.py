@@ -20,6 +20,7 @@ from dataclasses import dataclass
 MIN_TRIALS = 20
 MARGIN = 0.02  # above the highest impostor score
 MIN_BAND = 0.05  # accept - reject is never smaller than this
+MAX_LONG_NOT_ACCEPTED = 0.15  # of the owner's 2 s+ trials, before --write refuses
 
 
 @dataclass(frozen=True)
@@ -31,8 +32,10 @@ class Proposal:
     other_trials: int
     owner_rejected: float  # share of owner trials below `reject`
     owner_unknown: float  # share of owner trials between the thresholds
-    false_accept_bound: float  # 95% upper bound on accepting someone else
+    false_accept_bound: float  # 95% bound on accepting someone else, per recording
     overlap: bool  # some other-speaker trial scored at or above some owner trial
+    short_leak: float  # share of short other-voice trials at or above `reject`: could
+    # pass as "?" right after the owner
 
 
 def eer(owner: list[float], others: list[float]) -> float:
@@ -53,7 +56,20 @@ def false_accept_bound(accepted: int, trials: int) -> float:
     return accepted / trials
 
 
-def propose(owner: list[float], others: list[float], max_owner_rejected: float = 0.02) -> Proposal:
+def propose(
+    owner: list[float],
+    others: list[float],
+    max_owner_rejected: float = 0.02,
+    other_recordings: int | None = None,
+    others_short: list[float] | None = None,
+) -> Proposal:
+    """Thresholds from pooled trials.
+
+    Windows cut from one recording are not independent: the false-accept
+    bound is computed over `other_recordings` (distinct recordings), not
+    over windows. `others_short` are sub-second windows of other voices,
+    scored only to report how many could pass as an unverified reply.
+    """
     if len(owner) < MIN_TRIALS or len(others) < MIN_TRIALS:
         raise ValueError(
             f"need at least {MIN_TRIALS} owner and {MIN_TRIALS} other-speaker trials "
@@ -71,9 +87,36 @@ def propose(owner: list[float], others: list[float], max_owner_rejected: float =
         other_trials=len(others),
         owner_rejected=sum(score < reject for score in owner) / len(owner),
         owner_unknown=sum(reject <= score < accept for score in owner) / len(owner),
-        false_accept_bound=false_accept_bound(0, len(others)),
+        false_accept_bound=false_accept_bound(0, other_recordings or len(others)),
         overlap=max(others) >= min(owner),
+        short_leak=(
+            sum(score >= reject for score in others_short) / len(others_short)
+            if others_short
+            else 0.0
+        ),
     )
+
+
+def problems(proposal: Proposal, owner_long: list[float]) -> list[str]:
+    """Why saving these thresholds would hurt (empty when they look sound).
+
+    `owner_long` are the owner's trials of 2 s or more: the speech owner-only
+    listening must deliver. If too much of it would not be accepted, the
+    thresholds would shut the owner out - typically because an "other
+    voices" recording has the owner audible in it.
+    """
+    found = []
+    if owner_long:
+        missed = sum(score < proposal.accept for score in owner_long) / len(owner_long)
+        if missed > MAX_LONG_NOT_ACCEPTED:
+            found.append(
+                f"{missed:.0%} of your speech of 2 s or more would not be accepted "
+                f"(accept at {proposal.accept:.2f}); is your voice in one of the "
+                "other-voices recordings?"
+            )
+    if proposal.accept >= 1.0:
+        found.append("the accept threshold is unreachable")
+    return found
 
 
 def windows(samples, seconds: float, rate: int = 16000) -> list:
