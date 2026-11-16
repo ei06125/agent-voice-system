@@ -633,6 +633,25 @@ def cmd_enroll(args) -> int:
     return 0
 
 
+def cmd_calibrate(args) -> int:
+    from . import enroll
+
+    try:
+        result = enroll.calibrate_device(
+            args.device,
+            args.owner,
+            args.others,
+            write=args.write,
+            min_s=float(config.load()["speaker_min_s"]),
+        )
+    except enroll.EnrollError as exc:
+        print(f"ears: {exc}")
+        return 1
+    for line in enroll.describe_calibration(result):
+        print(line)
+    return 0
+
+
 def cmd_listen(args) -> int:
     from . import listen
 
@@ -704,6 +723,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list", action="store_true", help="show which devices are enrolled")
     p.add_argument("--delete", action="store_true", help="delete the voiceprint")
     p.set_defaults(func=cmd_enroll)
+
+    p = sub.add_parser("calibrate", help="set a microphone's owner-only thresholds")
+    p.add_argument("--device", required=True, help="an enrolled device")
+    p.add_argument("--owner", nargs="+", required=True, help="held-out recordings of you")
+    p.add_argument("--others", nargs="+", required=True, help="recordings of other voices")
+    p.add_argument("--write", action="store_true", help="save the proposed thresholds")
+    p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("listen", help="run the listener (Claude Code starts this as a monitor)")
     p.add_argument("--input-file", help="play an audio file instead of opening the microphone")

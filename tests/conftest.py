@@ -52,3 +52,11 @@ def speaker_assets():
             "run python3 tests/speaker_assets.py"
         )
     return assets
+
+
+@pytest.fixture
+def cli_world(tmp_path, monkeypatch, capsys):
+    """`ears enroll` / `ears calibrate` with a stand-in model (enroll_helpers)."""
+    import enroll_helpers
+
+    return enroll_helpers.make_world(tmp_path, monkeypatch, capsys)

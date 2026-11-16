@@ -352,7 +352,7 @@ def test_status_reports_the_voiceprint_without_revealing_it(capsys, no_claude):
 
 def test_enroll_goes_through_uv_like_the_listener():
     launcher = LAUNCHER.read_text()
-    assert "doctor | enroll)" in launcher
+    assert "doctor | enroll | calibrate)" in launcher
 
 
 def test_status_shows_the_speaker_check_when_it_is_on(capsys, monkeypatch):

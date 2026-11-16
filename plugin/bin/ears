@@ -89,7 +89,7 @@ case "$command_name" in
     done
     ;;
 
-  doctor | enroll)
+  doctor | enroll | calibrate)
     UV="$(find_uv)"
     if [ -z "$UV" ]; then
       echo "ears: uv is not installed (brew install uv)" >&2
