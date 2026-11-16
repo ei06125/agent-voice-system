@@ -1,0 +1,107 @@
+[
+  {
+    "id": "S1",
+    "url": "https://raw.githubusercontent.com/wenet-e2e/wespeaker/master/README.md",
+    "accessed": "2026-11-16",
+    "sha256": "e0e8f1c535bc79ebca38e0971f9eeac482e5bbcf95cf74d4224d74654d6d8ece",
+    "bytes": 10151
+  },
+  {
+    "id": "S2",
+    "url": "https://raw.githubusercontent.com/wenet-e2e/wespeaker/master/docs/pretrained.md",
+    "accessed": "2026-11-16",
+    "sha256": "34a46fc9faeb6a5c8204c840a06b1ca94fc5ac3c52d5460f5bd6c1bf9aa701cf",
+    "bytes": 13382
+  },
+  {
+    "id": "S3",
+    "url": "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/master/python-api-examples/speaker-identification.py",
+    "accessed": "2026-11-16",
+    "sha256": "007265a8fa95cbfa2239d08b530436ce49537b94facef12b1a70084fe14f3bc6",
+    "bytes": 7187
+  },
+  {
+    "id": "S4",
+    "url": "https://raw.githubusercontent.com/speechbrain/speechbrain/develop/recipes/VoxCeleb/SpeakerRec/README.md",
+    "accessed": "2026-11-16",
+    "sha256": "5c217d75a98b4778f6ca9fb3135426b12ddac097f1cf8fb3158966214e1b0b89",
+    "bytes": 7979
+  },
+  {
+    "id": "S5",
+    "url": "https://raw.githubusercontent.com/speechbrain/speechbrain/develop/speechbrain/inference/speaker.py",
+    "accessed": "2026-11-16",
+    "sha256": "8d9b3da17b363353c754ff0f2ebd66606545c74af6b0e36d6db13bd2f6a49ee3",
+    "bytes": 4332
+  },
+  {
+    "id": "S6",
+    "url": "https://raw.githubusercontent.com/pyannote/pyannote-audio/develop/README.md",
+    "accessed": "2026-11-16",
+    "sha256": "fb790724a0d1768fd0f0654d0f687a778812b6c6a9642a1ff2956debaf492f89",
+    "bytes": 12425
+  },
+  {
+    "id": "S7",
+    "url": "https://raw.githubusercontent.com/juanmc2005/diart/main/README.md",
+    "accessed": "2026-11-16",
+    "sha256": "9f4a8d429d5d37ab703862879453b1f7224b9532cadcd9cfddf384babd0dab27",
+    "bytes": 18900
+  },
+  {
+    "id": "S8",
+    "url": "https://raw.githubusercontent.com/Picovoice/eagle/main/README.md",
+    "accessed": "2026-11-16",
+    "sha256": "3f7ccf6f9a60dfb194835a0f56587e62a7459069b0b3ee052a584d7b2521d579",
+    "bytes": 20217
+  },
+  {
+    "id": "S9",
+    "url": "https://raw.githubusercontent.com/resemble-ai/Resemblyzer/master/README.md",
+    "accessed": "2026-11-16",
+    "sha256": "8cf29b7141b61dca32ba088ce169e8ad102ee2d1acc60a61e975d37c4aa0229c",
+    "bytes": 5044
+  },
+  {
+    "id": "S10",
+    "url": "https://raw.githubusercontent.com/asvspoof-challenge/2021/main/README.md",
+    "accessed": "2026-11-16",
+    "sha256": "25046c5af29607ca2b70af15583624dcb431c4ad3be6b3d493a5147d5c849029",
+    "bytes": 5504
+  },
+  {
+    "id": "S11",
+    "url": "https://raw.githubusercontent.com/asvspoof-challenge/asvspoof5/main/README.md",
+    "accessed": "2026-11-16",
+    "sha256": "3c75c065a90f3286b85aa72f306a66be5ccbabdce3fbf77986eb022c4414e1c1",
+    "bytes": 1234
+  },
+  {
+    "id": "S12",
+    "url": "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/README.md",
+    "accessed": "2026-11-16",
+    "sha256": "bcfbdb9be1973009221c74a81c016f3707868ceb8cc0d931e49be9478e1600e6",
+    "bytes": 41037
+  },
+  {
+    "id": "S13",
+    "url": "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/master/LICENSE",
+    "accessed": "2026-11-16",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "bytes": 11358
+  },
+  {
+    "id": "S14",
+    "url": "https://raw.githubusercontent.com/speechbrain/speechbrain/develop/LICENSE",
+    "accessed": "2026-11-16",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "bytes": 11357
+  },
+  {
+    "id": "S15",
+    "url": "https://raw.githubusercontent.com/pyannote/pyannote-audio/develop/LICENSE",
+    "accessed": "2026-11-16",
+    "sha256": "a3b53644a76e70e289b25271b119c0a1aadaaf0db7a16225fb494fdc0e36c32a",
+    "bytes": 1061
+  }
+]
