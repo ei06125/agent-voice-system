@@ -38,3 +38,17 @@ class FakeClock:
 @pytest.fixture
 def clock():
     return FakeClock()
+
+
+@pytest.fixture(scope="session")
+def speaker_assets():
+    """Real speaker models and public clips; skips unless they were fetched."""
+    import speaker_assets as assets
+
+    absent = assets.missing()
+    if absent:
+        pytest.skip(
+            f"speaker test assets not fetched ({len(absent)} missing): "
+            "run python3 tests/speaker_assets.py"
+        )
+    return assets

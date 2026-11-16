@@ -54,7 +54,9 @@ claude plugin validate plugin
 ```
 
 The end-to-end tests need `whisper-server`, `ffmpeg`, `say` and the speech model
-in `~/.donna/models`; they skip themselves otherwise. The pre-commit hook
+in `~/.donna/models`; they skip themselves otherwise. The speaker-model tests
+need real models and public clips, fetched once (pinned by sha256) with
+`python3 tests/speaker_assets.py`; they skip without them. The pre-commit hook
 (`.githooks/pre-commit`) runs gitleaks and the whole suite.
 
 To try a change in a real session without touching the one you are in, start
