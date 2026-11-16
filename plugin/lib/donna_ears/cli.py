@@ -241,6 +241,8 @@ def cmd_speaker(args) -> int:
         return 0
     config.write_control(speaker=args.speaker)
     print(f"ears: speaker check {SPEAKER_HELP[args.speaker]}")
+    if args.speaker != "off":
+        print("      " + _voiceprint_line())
     if not active:
         print("      (no active listener right now; a new session starts with the configured one)")
     return 0

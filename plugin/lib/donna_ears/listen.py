@@ -129,6 +129,7 @@ class Listener:
         # the transcription worker never reads them.
         self._device = ""
         self._epoch = 0
+        self._replying = False
         self._speaker_mode = str(cfg["speaker"])
         # Used only by the transcription worker; loads its model lazily there.
         self.owner = ownercheck.OwnerCheck(cfg, log, self.error_once)
@@ -368,7 +369,6 @@ class Listener:
         gated = False
         voiced_run = 0
         barged = False
-        replying = False
 
         while not self._stopping():
             now = time.monotonic()
@@ -415,8 +415,7 @@ class Listener:
                     continue
                 failures = 0
                 opened = True
-                self._device = source.name
-                self._epoch += 1
+                self._on_open(source.name)
                 segmenter.reset()
                 self.vad.reset_states()
                 last_frame = time.monotonic()
@@ -456,10 +455,7 @@ class Listener:
                     silent_since = None
 
             reply = speaking.get()
-            if bool(reply) != replying:
-                # Speech either side of a reply is not one conversation turn.
-                replying = bool(reply)
-                self._epoch += 1
+            self._on_reply(bool(reply))
             if reply and reply.get("gate"):
                 gate_until = now + GATE_HANGOVER_S
             if now < gate_until:
@@ -533,6 +529,17 @@ class Listener:
         if changed:
             self.write_state()
 
+    def _on_open(self, device: str) -> None:
+        """Capture (re)opened: a new device, perhaps, and a new epoch."""
+        self._device = device
+        self._epoch += 1
+
+    def _on_reply(self, replying: bool) -> None:
+        """Speech either side of a spoken reply is not one conversation turn."""
+        if replying != self._replying:
+            self._replying = replying
+            self._epoch += 1
+
     def _stamp(self, segment) -> None:
         segment.device = self._device
         segment.epoch = self._epoch
@@ -586,7 +593,11 @@ class Listener:
         import numpy as np
 
         samples = np.concatenate(segment.frames)
-        check = self.owner.assess(segment, samples)
+        try:
+            check = self.owner.assess(segment, samples)
+        except Exception:  # noqa: BLE001 - the check must never cost a segment
+            self.log.exception("speaker check error")
+            check = None
         if check is not None and check.route == owner.DROP:
             # Not the owner: never transcribed, so the words never exist.
             self.speaker_dropped += 1

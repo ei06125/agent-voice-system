@@ -48,11 +48,16 @@ def verified_model(profile: voiceprint.Profile):
     return path, voiceprint.ModelId(profile.model.name, sha256, profile.model.preprocessing)
 
 
+MAX_FAILURES = 3  # consecutive model failures before the check goes inactive
+COUNT_KEYS = ("owner", "other", "unknown", "inactive")
+
+
 @dataclass(frozen=True)
 class Assessment:
     decision: owner.Decision
     route: str  # owner.DELIVER / UNVERIFIED / DROP
-    active: bool  # False: the check could not run; route is DELIVER
+    active: bool  # False: the check could not run (or is uncalibrated); route is DELIVER
+    would: str | None = None  # what owner mode would do (shadow review); None if not judged
 
     def record(self) -> dict:
         score = self.decision.score
@@ -61,6 +66,7 @@ class Assessment:
             "why": self.decision.reason,
             "score": None if score is None else round(score, 3),
             "route": self.route,
+            "would": self.would,
         }
 
 
@@ -74,29 +80,56 @@ class OwnerCheck:
         self.threads = int(cfg["speaker_threads"])
         self.alias = str(cfg["speaker_device"]).strip()
         self.follow = owner.Follow(float(cfg["speaker_follow_s"]))
-        self.counts: Counter = Counter()
-        self._loaded = False
+        # Every key up front: the capture thread copies this for the state
+        # file while the worker updates it, and a dict must not grow meanwhile.
+        self.counts: Counter = Counter({key: 0 for key in COUNT_KEYS})
+        self._stamp: tuple | None = None  # the voiceprint file's (mtime, size) when loaded
         self._unavailable: str | None = None
         self._profile: voiceprint.Profile | None = None
         self._embedder = None
+        self._embedder_model: voiceprint.ModelId | None = None
+        self._failures = 0
         self._warned: set[str] = set()
 
-    def _load(self) -> None:
-        self._loaded = True
+    def _file_stamp(self) -> tuple | None:
+        try:
+            info = voiceprint.path().stat()
+        except OSError:
+            return None
+        return (info.st_mtime_ns, info.st_size)
+
+    def _refresh(self) -> None:
+        """(Re)load the voiceprint when it changed: `ears enroll` and `ears
+        calibrate --write` take effect in a running session."""
+        stamp = self._file_stamp()
+        if self._profile is not None or self._unavailable is not None:
+            if stamp == self._stamp:
+                return
+        self._stamp = stamp
+        self._unavailable = None
+        self._warned.clear()
+        self._failures = 0
         try:
             profile = voiceprint.load()
             if profile is None or not profile.devices:
                 raise voiceprint.ProfileError("there is no voiceprint (ears enroll)")
-            path, model = verified_model(profile)
-            embedder = make_embedder(path, threads=self.threads)
-            profile.check(voiceprint.ModelId(model.name, model.sha256, embedder.preprocessing))
+            if self._embedder is None or self._embedder_model != profile.model:
+                path, model = verified_model(profile)
+                self._embedder = make_embedder(path, threads=self.threads)
+                self._embedder_model = profile.model
+            else:
+                model = self._embedder_model
+            profile.check(
+                voiceprint.ModelId(model.name, model.sha256, self._embedder.preprocessing)
+            )
         except voiceprint.ProfileError as exc:
-            self._unavailable = str(exc)
+            self._unavailable, self._profile = str(exc), None
             return
         except Exception as exc:  # noqa: BLE001 - a broken model must not stop listening
             self._unavailable = f"the speaker model failed to load ({type(exc).__name__})"
+            self._profile = None
             return
-        self._profile, self._embedder = profile, embedder
+        self._profile = profile
         self.log.info("speaker check ready: %s device(s)", len(profile.devices))
 
     def _tell(self, key: str, message: str, mode: str) -> None:
@@ -113,15 +146,35 @@ class OwnerCheck:
         self.counts["inactive"] += 1
         return Assessment(owner.Decision(owner.UNKNOWN, why, score), owner.DELIVER, False)
 
+    def _score(self, samples, centroid) -> float | None:
+        """Similarity of the segment's start and, for a long one, its end.
+
+        A segment longer than speaker_max_s is judged on both ends and gets
+        the lower score: if someone else took over, it is not the owner's.
+        """
+        limit = int(self.max_embed_s * speaker.fbank.SAMPLE_RATE)
+        pieces = [samples[:limit]]
+        if len(samples) > limit:
+            pieces.append(samples[-limit:])
+        scores = []
+        for piece in pieces:
+            try:
+                scores.append(speaker.score(self._embedder.embed(piece), centroid))
+            except speaker.SpeakerError:
+                return None  # too short to embed: no score, so not the owner
+        self._failures = 0
+        return min(scores)
+
     def assess(self, segment, samples) -> Assessment | None:
         mode = getattr(segment, "speaker_mode", "off")
         if mode not in ("shadow", "owner"):
             return None
-        if not self._loaded:
-            self._load()
+        self._refresh()
         if self._unavailable:
             self._tell("speaker-unavailable", self._unavailable, mode)
             return self._inactive("unavailable")
+        if self._failures >= MAX_FAILURES:
+            return self._inactive("failing")
         device = self.alias or segment.device
         entry = self._profile.device(device)
         if entry is None:
@@ -132,14 +185,19 @@ class OwnerCheck:
             )
             return self._inactive("no-profile")
 
-        score = None
         try:
-            limit = int(self.max_embed_s * speaker.fbank.SAMPLE_RATE)
-            score = speaker.score(self._embedder.embed(samples[:limit]), entry.centroid)
-        except speaker.SpeakerError:
-            pass  # too short to embed: no score, so not the owner
+            score = self._score(samples, entry.centroid)
         except Exception as exc:  # noqa: BLE001 - one bad segment must not stop listening
+            self._failures += 1
             self.log.warning("speaker check failed on a segment (%s)", type(exc).__name__)
+            if self._failures >= MAX_FAILURES:
+                self._tell(
+                    "speaker-failing",
+                    f"the speaker model keeps failing ({type(exc).__name__})",
+                    mode,
+                )
+                return self._inactive("failing")
+            score = None
 
         decision = owner.classify(
             score,
@@ -151,17 +209,24 @@ class OwnerCheck:
         follows = self.follow.allows(
             device=device, epoch=segment.epoch, started_at=segment.started_at
         )
-        self.follow.note(decision, device=device, epoch=segment.epoch, ended_at=segment.ended_at)
+        self.follow.note(
+            decision,
+            device=device,
+            epoch=segment.epoch,
+            ended_at=segment.ended_at,
+            short=segment.voiced_seconds < self.min_voiced_s,
+        )
         self.counts[decision.kind] += 1
         self.log.info("speaker: %s (%s) on %s, %s", decision.kind, decision.reason, device, mode)
+        would = owner.route(decision, follows)
 
         if mode == "owner" and entry.calibrated:
-            return Assessment(decision, owner.route(decision, follows), True)
+            return Assessment(decision, would, True, would)
         if mode == "owner":
             self._tell(
                 f"speaker-calibration:{device}",
                 f"{device!r} has no thresholds yet (calibrate it first)",
                 mode,
             )
-            return Assessment(decision, owner.DELIVER, False)
-        return Assessment(decision, owner.DELIVER, True)
+            return Assessment(decision, owner.DELIVER, False, would)
+        return Assessment(decision, owner.DELIVER, True, would)

@@ -184,13 +184,13 @@ def reads_controls(world):
 
 @when(parsers.parse('the listener switches to "{device}"'))
 def switches(world, device):
-    world.listener._device = device
-    world.listener._epoch += 1
+    world.listener._on_open(device)
 
 
 @when("a spoken reply plays")
 def reply_plays(world):
-    world.listener._epoch += 1
+    world.listener._on_reply(True)
+    world.listener._on_reply(False)
 
 
 # ------------------------------------------------------------------- then
@@ -228,7 +228,9 @@ def log_lacks(world, word):
 
 @then("the log does not contain a score")
 def log_no_score(world):
-    assert "score" not in world.log_text() and "1.0" not in world.log_text()
+    verdicts = [line for line in world.log_text().splitlines() if "speaker:" in line]
+    assert verdicts and not any(ch.isdigit() for line in verdicts for ch in line)
+    assert "score" not in world.log_text()
 
 
 @then("the log says once that there is no voiceprint")

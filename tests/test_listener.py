@@ -180,3 +180,30 @@ def test_the_state_file_reports_progress(listener):
     assert config.listeners()[0]["detail"] == "cannot open the microphone"
     listener.write_state("listening")
     assert "detail" not in config.listeners()[0]
+
+
+def test_the_capture_epoch_moves_on_open_and_on_each_reply_edge(listener):
+    start = listener._epoch
+    listener._on_open("AirPods")
+    assert (listener._device, listener._epoch) == ("AirPods", start + 1)
+    listener._on_reply(False)  # no change, no new epoch
+    assert listener._epoch == start + 1
+    listener._on_reply(True)
+    listener._on_reply(True)
+    listener._on_reply(False)
+    assert listener._epoch == start + 3
+
+
+def test_a_failing_speaker_check_never_costs_a_segment(listener, monkeypatch):
+    import numpy as np
+
+    from donna_ears.segmenter import Segment
+
+    def boom(segment, samples):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(listener.owner, "assess", boom)
+    monkeypatch.setattr(listener, "_transcribe", lambda samples: ("still heard", "en"))
+    frames = [np.zeros(512, np.float32)] * 50
+    listener._handle(Segment(frames=frames, started_at=1.0, ended_at=2.6, voiced_seconds=1.6))
+    assert [u.text for u in listener.batcher.take()] == ["still heard"]

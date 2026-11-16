@@ -88,3 +88,10 @@ class TestFollow:
         follow.note(classify(0.9), device="AirPods", epoch=1, ended_at=100.0)
         follow.note(classify(0.1), device="AirPods", epoch=1, ended_at=102.0)
         assert not follow.allows(device="AirPods", epoch=1, started_at=103.0)
+
+
+def test_a_short_other_verdict_is_too_noisy_to_end_the_owners_turn():
+    follow = owner.Follow(window_s=5.0)
+    follow.note(classify(0.9), device="AirPods", epoch=1, ended_at=100.0)
+    follow.note(classify(0.1, voiced=0.5), device="AirPods", epoch=1, ended_at=101.0, short=True)
+    assert follow.allows(device="AirPods", epoch=1, started_at=102.0)

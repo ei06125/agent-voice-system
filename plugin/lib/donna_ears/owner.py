@@ -69,19 +69,23 @@ class Follow:
     """Remembers the owner's last segment, to let a short reply follow it.
 
     Continuity holds only on the same device and the same capture epoch (the
-    listener bumps the epoch whenever capture restarts, a reply plays, or the
-    gate closes), and for `window_s` from the end of the owner's segment.
-    Only an owner decision extends it; anyone else speaking ends it.
+    listener bumps the epoch whenever capture (re)opens and when a spoken
+    reply starts or stops), and for `window_s` from the end of the owner's
+    segment. Only an owner decision extends it; anyone else speaking for at
+    least the minimum length ends it.
     """
 
     def __init__(self, window_s: float) -> None:
         self.window_s = window_s
         self._last: tuple[str, int, float] | None = None
 
-    def note(self, decision: Decision, *, device: str, epoch: int, ended_at: float) -> None:
+    def note(
+        self, decision: Decision, *, device: str, epoch: int, ended_at: float, short: bool = False
+    ) -> None:
         if decision.kind == OWNER:
             self._last = (device, epoch, ended_at)
-        elif decision.kind == OTHER:
+        elif decision.kind == OTHER and not short:
+            # A sub-second "other" is too noisy to end the owner's turn.
             self._last = None
 
     def allows(self, *, device: str, epoch: int, started_at: float) -> bool:
