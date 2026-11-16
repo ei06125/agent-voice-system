@@ -115,3 +115,84 @@ plumbing and parity. They say **nothing** about the owner's thresholds.
   one setup), but ResNet34 is the default for plumbing until the M9 bake-off.
 - Mean-centring embeddings (WeSpeaker's "Vox2-dev mean normalisation") helps a
   lot. It needs a cohort mean vector, which is a candidate addition after M9.
+
+## Status (2026-11-16, end of the unattended session)
+
+M0–M8 are committed on `voice-biometrics`, one commit each, plus M8.1 and
+M8.2: fixes from Fable's review of the finished code (`git log --oneline
+929cf31^..HEAD`). Every commit was made with `--no-verify` because of the
+sandbox network; each ran gitleaks, the unit suite and ruff by hand (see the
+commit bodies). What exists now:
+
+| Command | What it does |
+| --- | --- |
+| `ears enroll --device NAME clip.wav ...` | voiceprint for one microphone, from recordings (never opens the mic) |
+| `ears enroll --list` / `--delete` | which devices are enrolled / remove the voiceprint |
+| `ears calibrate --device NAME --owner ... --others ... [--write [--force]]` | proposes per-device thresholds; `--write` saves them unless they would shut you out |
+| `ears speaker off\|shadow\|owner` | runtime switch; config key `speaker` sets the session default |
+| `ears status` | voiceprint devices, calibrated or not; speaker mode and verdict counts |
+
+Owner mode filters a device **only once it is calibrated**. Until then, it
+delivers everything and says once that it is inactive.
+
+## M9 runbook (with the owner, on the Mac)
+
+1. **Verify the branch where the hook can run.**
+   `uv run --with pytest pytest -q tests` (let uv re-lock for `pytest-bdd`;
+   this runs `tests/test_pipeline.py` and the lifecycle tests that skipped in
+   the sandbox), then `python3 tests/speaker_assets.py` and run it again so the
+   real-model tests run too.
+2. **Find the exact device names** as the listener sees them: `ears status`
+   while listening on each (`listening on "…"`), or `ears doctor`. A device's
+   name must match its voiceprint exactly. `speaker_device` in config can
+   force one voiceprint for every input.
+3. **Record** (on purpose, by you; kept outside the repo, e.g. `~/.donna/eval/`):
+   - *enroll* (day 1), per device: 6–10 clips of 5–10 s, reading and talking
+     freely, English and Portuguese;
+   - *owner held-out* (day 2), per device: ~20 clips of 1–15 s, including
+     short replies ("yes", "okay", "sim", "stop");
+   - *others*, per device: a podcast or video played near the mic (the Brio
+     especially), and other people if they agree.
+
+   Any recorder works. With ffmpeg:
+   `ffmpeg -f avfoundation -list_devices true -i ""`, then
+   `ffmpeg -f avfoundation -i ":<audio index>" -t 8 -ac 1 -ar 16000 clip.wav`.
+4. **Enroll:** `ears enroll --device "<Brio name>" ~/.donna/eval/brio/enroll/*.wav`,
+   and the same for the AirPods.
+5. **Calibrate:** a dry run first, then `--write`:
+   `ears calibrate --device "<Brio name>" --owner ~/.donna/eval/brio/owner/*.wav --others ~/.donna/eval/brio/others/*.wav`.
+   Check the "unknown" share for your own speech and the overlap warning.
+6. **Bake-off (optional):** `ears enroll --replace --model <name> …` and
+   `ears calibrate` (dry run) for each of
+   `wespeaker_en_voxceleb_resnet34`, `…_resnet34_LM`,
+   `3dspeaker_speech_campplus_sv_en_voxceleb_16k`. Keep the lowest EER at
+   1–2 s, then re-enroll with it.
+7. **Shadow for a few days:** `ears speaker shadow`. `ears status` counts the
+   verdicts; the private transcript records each verdict and score.
+8. **Owner-only:** `ears speaker owner`, or `"speaker": "owner"` under `"ears"`
+   in `~/.donna/config.json`.
+9. README privacy paragraph, merge via PR.
+
+## Open decisions for the owner
+
+1. **Short replies to DONNA's spoken questions** *(Fable)*. The capture
+   epoch moves on when a spoken reply starts *and* when it stops. So when
+   DONNA asks "shall I push?" out loud, the owner's short "yes" afterwards
+   is in a new epoch, does not follow the owner, and is dropped in owner
+   mode. That is safe but awkward with spoken replies on. One option: after
+   a reply ends, a short segment on the same device (headphones only)
+   within `speaker_follow_s` is delivered as `?`. Shadow mode now records
+   `would` for each segment, so a few days of shadow data can settle this.
+2. **How much to trust a short "?"**. On the public clips, 32% of other
+   voices' 0.5 s snippets scored at or above `reject`. Inside the follow-on
+   window such a snippet would be delivered as `?`. `protocol.md` tells the
+   model `?` lines are unconfirmed and not to start work on them alone.
+   Decide after seeing your own numbers (`ears calibrate` reports this rate).
+3. **Model choice** (bake-off, runbook step 6), and whether to add an
+   embedding mean (cohort) vector later: it widened the gap a lot in the
+   spike.
+
+Deferred, not forgotten: splitting segments where speakers change (now a
+long segment is judged on its start and end, taking the lower score);
+AS-Norm; Keychain encryption of the voiceprint; interactive enrollment
+from the microphone.
