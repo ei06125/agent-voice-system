@@ -148,6 +148,48 @@ class MicSource:
                 pass
 
 
+def decode_file(path: str):
+    """16 kHz mono float32 samples from any audio file (ffmpeg unless it is
+    already 16 kHz mono 16-bit WAV)."""
+    import numpy as np
+
+    try:
+        with wave.open(path, "rb") as source:
+            if (
+                source.getframerate() == SAMPLE_RATE
+                and source.getnchannels() == 1
+                and source.getsampwidth() == 2
+            ):
+                raw = source.readframes(source.getnframes())
+                return np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    except (wave.Error, EOFError, OSError):
+        pass
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise SourceError(f"{path} is not 16 kHz mono 16-bit WAV and ffmpeg is missing")
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-i",
+            path,
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-ar",
+            str(SAMPLE_RATE),
+            "-",
+        ],  # fmt: skip
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SourceError(f"ffmpeg could not decode {path}: {result.stderr[-200:]!r}")
+    return np.frombuffer(result.stdout, dtype="<i2").astype(np.float32) / 32768.0
+
+
 class FileSource:
     """Plays an audio file as if it were being spoken into the microphone."""
 
@@ -173,43 +215,7 @@ class FileSource:
         self._started = 0.0
 
     def _decode(self):
-        import numpy as np
-
-        try:
-            with wave.open(self.path, "rb") as source:
-                if (
-                    source.getframerate() == SAMPLE_RATE
-                    and source.getnchannels() == 1
-                    and source.getsampwidth() == 2
-                ):
-                    raw = source.readframes(source.getnframes())
-                    return np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-        except (wave.Error, EOFError, OSError):
-            pass
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            raise SourceError(f"{self.path} is not 16 kHz mono 16-bit WAV and ffmpeg is missing")
-        result = subprocess.run(
-            [
-                ffmpeg,
-                "-v",
-                "error",
-                "-i",
-                self.path,
-                "-f",
-                "s16le",
-                "-ac",
-                "1",
-                "-ar",
-                str(SAMPLE_RATE),
-                "-",
-            ],  # fmt: skip
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise SourceError(f"ffmpeg could not decode {self.path}: {result.stderr[-200:]!r}")
-        return np.frombuffer(result.stdout, dtype="<i2").astype(np.float32) / 32768.0
+        return decode_file(self.path)
 
     def open(self) -> None:
         if self._samples is None:

@@ -147,6 +147,7 @@ def cmd_status(args) -> int:
                 "plugin is enabled."
             )
     print("      " + _voice_line(config.load()))
+    print("      " + _voiceprint_line())
     for other in listeners:
         if other is not mine:
             print("other session -> " + _describe(other).replace("\n", "\n                 "))
@@ -552,6 +553,48 @@ def cmd_doctor(args) -> int:
     return 0 if healthy else 1
 
 
+def _voiceprint_line() -> str:
+    from . import voiceprint
+
+    try:
+        profile = voiceprint.load()
+    except voiceprint.ProfileError as exc:
+        return f"voiceprint: unusable ({exc})"
+    if profile is None or not profile.devices:
+        return "voiceprint: none (ears enroll --device NAME clip.wav ...)"
+    devices = ", ".join(
+        f"{name} ({'calibrated' if entry.calibrated else 'not calibrated'})"
+        for name, entry in sorted(profile.devices.items())
+    )
+    return f"voiceprint: {devices}; model {profile.model.name}"
+
+
+def cmd_enroll(args) -> int:
+    from . import voiceprint
+
+    if args.delete:
+        removed = voiceprint.delete()
+        print("ears: voiceprint deleted." if removed else "ears: there was no voiceprint.")
+        return 0
+    if args.list:
+        print("ears: " + _voiceprint_line())
+        return 0
+    if not args.device or not args.files:
+        print("ears: enroll needs --device NAME and at least one recording of your speech")
+        return 2
+    from . import enroll, speaker_models
+
+    model = args.model or speaker_models.DEFAULT
+    try:
+        report = enroll.enroll(args.files, args.device, model, replace=args.replace)
+    except enroll.EnrollError as exc:
+        print(f"ears: {exc}")
+        return 1
+    for line in enroll.describe(report):
+        print(line)
+    return 0
+
+
 def cmd_listen(args) -> int:
     from . import listen
 
@@ -610,6 +653,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("voice", help="spoken replies: on, off, stop (what is being said)")
     p.add_argument("action", nargs="?", choices=("on", "off", "stop", "status"), default="status")
     p.set_defaults(func=cmd_voice)
+
+    p = sub.add_parser("enroll", help="make your voiceprint for one microphone from recordings")
+    p.add_argument("files", nargs="*", help="recordings of your own speech (any audio format)")
+    p.add_argument("--device", help="the input device they were recorded on (see `ears status`)")
+    p.add_argument("--model", help=argparse.SUPPRESS)
+    p.add_argument("--replace", action="store_true", help="start a new voiceprint")
+    p.add_argument("--list", action="store_true", help="show which devices are enrolled")
+    p.add_argument("--delete", action="store_true", help="delete the voiceprint")
+    p.set_defaults(func=cmd_enroll)
 
     p = sub.add_parser("listen", help="run the listener (Claude Code starts this as a monitor)")
     p.add_argument("--input-file", help="play an audio file instead of opening the microphone")

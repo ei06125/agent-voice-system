@@ -333,3 +333,23 @@ def test_hook_commands_work_on_the_system_python(donna_home):
     )
     assert result.returncode == 0, result.stderr
     assert "additionalContext" in result.stdout
+
+
+def test_status_reports_the_voiceprint_without_revealing_it(capsys, no_claude):
+    from donna_ears import voiceprint
+
+    _, out = run(capsys, "status")
+    assert "voiceprint: none" in out
+    profile = voiceprint.Profile.new(voiceprint.ModelId("m", "a" * 64, "p"))
+    profile.enroll("AirPods", [[0.6, 0.8]], seconds=30.0)
+    profile.enroll("Logitech BRIO", [[0.8, 0.6]], seconds=30.0)
+    profile.calibrate("AirPods", accept=0.7, reject=0.4)
+    voiceprint.save(profile)
+    _, out = run(capsys, "status")
+    assert "AirPods (calibrated), Logitech BRIO (not calibrated)" in out
+    assert "0.6" not in out and "0.8" not in out
+
+
+def test_enroll_goes_through_uv_like_the_listener():
+    launcher = LAUNCHER.read_text()
+    assert "doctor | enroll)" in launcher
