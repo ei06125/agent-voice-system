@@ -1,6 +1,6 @@
 [project]
 name = "donna"
-version = "0.3.0"
+version = "1.0.0"
 description = "Ambient voice for Claude Code: live microphone transcripts pushed into the session"
 readme = "README.md"
 requires-python = ">=3.11"

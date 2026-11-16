@@ -92,15 +92,28 @@ and [uv](https://docs.astral.sh/uv/).
 brew install whisper-cpp uv
 ```
 
-Enable the plugin for this project only, loaded in place from this checkout:
+Install a release into your user account (every project):
 
 ```sh
-claude plugin marketplace add /path/to/DONNA --scope local
-claude plugin install donna@donna --scope local
+git tag v1.0.0            # once per release; the version is in plugin/.claude-plugin/plugin.json
+scripts/install.sh        # installs the tag that matches this checkout
 ```
 
-Use `--scope user` instead to have it in every project. To try it for one
-session without installing anything:
+The script clones the plugin at that tag into Claude Code's plugin cache, so the
+installed copy is a snapshot: editing or deleting this checkout does not change
+it. It does this through a one-plugin marketplace it writes to
+`~/.donna/marketplace` (`donna@donna-release`).
+
+| To | Run |
+| --- | --- |
+| Upgrade or move to another tag | `scripts/install.sh --ref v1.0.1` |
+| Install from a remote instead of this checkout | `scripts/install.sh --source git@github.com:you/DONNA.git --ref v1.0.0` |
+| Remove it | `scripts/install.sh --uninstall` (transcripts, settings and models stay in `~/.donna`) |
+
+Installed at user scope, donna opens the microphone in **every interactive
+Claude Code session** on the machine. `ears pause` closes it for one session.
+
+For development, load the working tree instead, without installing anything:
 
 ```sh
 claude --plugin-dir /path/to/DONNA/plugin
@@ -238,8 +251,10 @@ plugin/bin/ears listen --input-file /tmp/hello.aiff --exit-at-eof
 against a recording instead of the microphone.
 
 ```
+scripts/install.sh           install, upgrade or remove a tagged release
+.claude-plugin/marketplace.json   development marketplace, loaded in place from this checkout
 plugin/
-  .claude-plugin/plugin.json
+  .claude-plugin/plugin.json   the version; keep in step with pyproject.toml (a test checks)
   monitors/monitors.json     the listener, as a monitor
   hooks/hooks.json           SessionStart: protocol for the model. SessionEnd: stop
   skills/ears/SKILL.md       /donna:ears

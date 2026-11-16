@@ -17,8 +17,8 @@ def load(relative):
 
 
 def test_the_marketplace_lists_the_plugin_by_relative_path():
-    # A relative-path plugin in a marketplace added from a local directory is
-    # loaded in place, so edits here take effect at the next session start.
+    # The development marketplace: added from this directory it is loaded in
+    # place. Releases are installed by scripts/install.sh, which clones a tag.
     market = load(".claude-plugin/marketplace.json")
     (entry,) = market["plugins"]
     assert entry["source"] == "./plugin"
@@ -101,3 +101,40 @@ def test_light_commands_import_nothing_outside_the_standard_library():
             assert not heavy.match(line), (
                 f"{module.name}:{number} imports an audio dependency at module level"
             )
+
+
+def test_every_place_that_states_the_version_states_the_same_one():
+    project = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
+    manifest = load("plugin/.claude-plugin/plugin.json")["version"]
+    code = re.search(
+        r'^__version__ = "(.+)"$', (PLUGIN / "lib/donna_ears/__init__.py").read_text(), re.M
+    ).group(1)
+    lock = tomllib.loads((REPO / "uv.lock").read_text())
+    (own,) = [p for p in lock["package"] if p["name"] == "donna"]
+    assert project == manifest == code == own["version"]
+    assert re.fullmatch(r"\d+\.\d+\.\d+", manifest)  # a tag is v<this>
+
+
+def test_the_plugin_directory_is_all_an_installed_copy_gets():
+    """An install clones the plugin directory alone into Claude Code's cache.
+    Anything reached outside it works here and fails there."""
+    for path in PLUGIN.rglob("*"):
+        if "__pycache__" in path.parts:
+            continue
+        assert not path.is_symlink(), f"{path.relative_to(REPO)} is a symlink"
+        if path.is_file():
+            assert "../" not in path.read_text(errors="ignore"), (
+                f"{path.relative_to(REPO)} reaches out of the plugin directory"
+            )
+
+
+def test_the_installer_parses_and_documents_itself():
+    import subprocess
+
+    script = REPO / "scripts" / "install.sh"
+    assert os.access(script, os.X_OK)
+    assert subprocess.run(["bash", "-n", str(script)]).returncode == 0
+    help_text = subprocess.run(
+        [str(script), "--help"], capture_output=True, text=True, check=True
+    ).stdout
+    assert "--ref" in help_text and "--uninstall" in help_text
