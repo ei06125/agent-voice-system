@@ -377,6 +377,8 @@ def _print_records(records: list[dict]) -> None:
             stamp = f"{day} {stamp}"
         language = record.get("lang") or ""
         tag = f" {language}" if language and language != "en" else ""
+        if (record.get("speaker") or {}).get("route") == "unverified":
+            tag += " ?"
         print(f"[heard {stamp}{tag}] {record['text']}")
 
 

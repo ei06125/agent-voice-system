@@ -141,3 +141,17 @@ def test_listener_messages_are_marked_as_coming_from_the_listener(clock):
     first, second = stream.getvalue().splitlines()
     assert first == "[ears error] cannot open the microphone"
     assert second == "[ears] downloading the model"
+
+
+def test_an_unverified_utterance_is_marked_on_every_line_it_wraps_onto():
+    long_text = " ".join(["word"] * 200)
+    lines = events.lines_for(Utterance(long_text, 0.0, 1.0, "pt", unverified=True))
+    assert len(lines) > 1
+    assert lines[0].startswith("[heard ") and " pt ?] " in lines[0]
+    assert all(line.startswith("[heard cont. ?] ") for line in lines[1:])
+    assert all(len(line) <= events.MAX_LINE for line in lines)
+
+
+def test_verified_speech_is_rendered_exactly_as_before():
+    (line,) = events.lines_for(Utterance("hello", 0.0, 1.0, "en"))
+    assert "?" not in line and line.endswith("] hello")

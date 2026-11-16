@@ -58,8 +58,10 @@ def _wrap(text: str, width: int) -> list[str]:
 def lines_for(utterance: Utterance) -> list[str]:
     language = utterance.language
     tag = f" {language}" if language and language != "en" else ""
-    head = f"[heard {stamp(utterance.started_at)}{tag}] "
-    more = "[heard cont.] "
+    # Owner-only listening: too short to verify, but right after the owner.
+    mark = " ?" if utterance.unverified else ""
+    head = f"[heard {stamp(utterance.started_at)}{tag}{mark}] "
+    more = f"[heard cont.{mark}] "
     width = MAX_LINE - max(len(head), len(more))
     pieces = _wrap(utterance.text, width)
     return [(head if i == 0 else more) + piece for i, piece in enumerate(pieces)]

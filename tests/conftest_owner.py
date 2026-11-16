@@ -104,7 +104,9 @@ def speak(world, text, seconds, owner_speaking, gap=0.5):
 
 @given(parsers.parse('the owner has a calibrated voiceprint for "{device}"'))
 def calibrated(device):
-    profile = voiceprint.Profile.new(voiceprint.ModelId("stub-model", "a" * 64, "stub"))
+    profile = voiceprint.load() or voiceprint.Profile.new(
+        voiceprint.ModelId("stub-model", "a" * 64, "stub")
+    )
     profile.enroll(device, [OWNER_VECTOR], seconds=40.0)
     profile.calibrate(device, accept=0.6, reject=0.3)
     voiceprint.save(profile)
@@ -232,3 +234,37 @@ def log_no_score(world):
 @then("the log says once that there is no voiceprint")
 def log_once_no_voiceprint(world):
     assert world.log_text().count("no voiceprint") == 1
+
+
+@then("nothing was transcribed for someone else")
+def nobody_else_transcribed(world):
+    assert all(level > 0 for level in world.transcribed), world.transcribed
+
+
+@then("nothing is delivered")
+def nothing_delivered(world):
+    assert world.delivered() == []
+
+
+@then("the transcript is empty")
+def transcript_empty(world):
+    assert world.records() == []
+
+
+@then(parsers.parse('"{text}" is delivered marked unverified'))
+def delivered_unverified(world, text):
+    lines = world.delivered()
+    assert any(
+        line.startswith("[heard ") and " ?] " in line and line.endswith(text) for line in lines
+    ), lines
+
+
+@then(parsers.parse('"{text}" is not delivered'))
+def not_delivered(world, text):
+    assert not any(line.endswith(f"] {text}") for line in world.delivered())
+
+
+@then("the user is told once that owner-only listening is inactive")
+def told_once(world):
+    out = world.listener.out._stream.getvalue()
+    assert out.count("owner-only listening is inactive") == 1, out

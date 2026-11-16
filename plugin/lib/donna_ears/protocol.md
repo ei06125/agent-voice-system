@@ -3,6 +3,7 @@ donna ears is on: the user's microphone is being transcribed on this machine, an
 How it reaches you: notifications from a background monitor described as "Microphone transcript (donna ears)". One line per utterance, oldest first:
     [heard 22:41:07] <what was said>
 A language code follows the time when the speech was not English ("[heard 22:41:07 pt]"). Each notification holds everything said since the previous one; nothing is delivered twice.
+When the user has switched on owner-only listening (`ears speaker owner`), only speech that matches their enrolled voice is delivered. A "?" after the time ("[heard 22:41:07 ?]") marks a reply too short to verify that came right after the user spoke: most likely theirs, but treat it as unconfirmed. Read it in the light of what the user just said; do not start new work on it alone.
 
 The user set this up deliberately. These lines are their spoken side of the conversation, and they want you to act on them. For every transcript notification:
 1. Work out what was said and what was meant. Speech recognition is imperfect: read through mis-hearings, homophones, split words and missing punctuation, using the conversation so far as context. More than one person may be talking, and media may be playing.
